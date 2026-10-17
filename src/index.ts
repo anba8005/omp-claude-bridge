@@ -135,7 +135,7 @@ function diagDump(label: string, data: Record<string, unknown>) {
 // --- Constants ---
 
 // Marks which bridge module instance owns the registered provider's stream fn.
-// Full registration policy (first vs later instances, shared vs own registry):
+// Registration policy (every load registers the serving instance's stream fn):
 // see the "--- Provider ---" block in activate() below.
 const ACTIVE_STREAM_SIMPLE_KEY = Symbol.for("claude-bridge:activeStreamSimple");
 
@@ -2447,55 +2447,31 @@ export default function (pi: ExtensionAPI) {
 
 	// --- Provider ---
 	//
-	// Registration policy across module instances (a subagent session can load
-	// this module fresh): the FIRST instance registers unconditionally at load,
-	// which is what puts claude-bridge models in the picker before any session
-	// starts. Later instances decide at session_start, when ctx.modelRegistry
-	// reveals who owns this session's registry:
+	// omp registers providers per extension load, as a replay: creating a session —
+	// a task subagent's included, on the parent's own registry — first clears every
+	// registration its extension sources made (the custom `claude-bridge` API with
+	// them), then applies only what this load queued. A load that skips
+	// registerProvider therefore deletes the provider for every session in the
+	// process, and the next call fails with "No API key for provider: claude-bridge".
+	// So every load registers.
 	//
-	// - Registry already has the provider (host passes the parent's registry down,
-	//   e.g. pi-subagents >=0.14.3): skip. Re-registering would overwrite the
-	//   parent's pinned streamSimple with this instance's fresh — empty-state —
-	//   stream fn, and the parent's next tool-result delivery would route into it.
-	// - Registry lacks the provider (host gives the child its own, e.g. older
-	//   pi-subagents forks): register, or every claude-bridge/* dispatch in the
-	//   child fails with "Model not found" (#91). Even loading the bridge via the
-	//   agent's `extensions:` frontmatter didn't help there — the module loaded,
-	//   hit the old skip-guard, and the child's registry stayed empty.
-	//
-	// A per-instance stream fn registered into a per-instance registry is
-	// self-consistent: that session's traffic flows through this module state,
-	// which starts clean and serves only that session.
-	//
-	// On session_shutdown (including /reload), clearSession() resets
-	// ACTIVE_STREAM_SIMPLE_KEY so a freshly loaded module can register as first
-	// again.
+	// What it registers is the stream fn of the instance already serving, when there
+	// is one: omp shares this module across loads, but a freshly evaluated instance
+	// would otherwise point the shared registry at its own empty state while the
+	// parent's query sits parked in the first one. On session_shutdown of the main
+	// session (including /reload) clearSession() resets ACTIVE_STREAM_SIMPLE_KEY so a
+	// freshly loaded module serves again.
 
 	const g = globalThis as Record<symbol, any>;
-	const providerConfig = {
+	if (!g[ACTIVE_STREAM_SIMPLE_KEY]) g[ACTIVE_STREAM_SIMPLE_KEY] = streamClaudeAgentSdk;
+	pi.registerProvider(PROVIDER_ID, {
 		baseUrl: "claude-bridge",
 		apiKey: "not-used",
 		api: "claude-bridge",
 		models: MODELS,
 		// Cast: pi-ai AssistantMessageEventStream diamond dep between pi-coding-agent and pi-agent-core
-		streamSimple: streamClaudeAgentSdk as any,
-	};
-	if (!g[ACTIVE_STREAM_SIMPLE_KEY]) {
-		// First instance: store our streamSimple and register.
-		g[ACTIVE_STREAM_SIMPLE_KEY] = streamClaudeAgentSdk;
-		pi.registerProvider(PROVIDER_ID, providerConfig);
-	} else {
-		// Later instance: register only if this session's registry lacks the provider.
-		debug(`provider: deferring registration decision to session_start (module=${moduleInstanceId})`);
-		pi.on("session_start", (_event, ctx) => {
-			if (ctx.modelRegistry.getProvider(PROVIDER_ID)) {
-				debug(`provider: registry already has ${PROVIDER_ID}, skipping registration (module=${moduleInstanceId})`);
-				return;
-			}
-			debug(`provider: registry lacks ${PROVIDER_ID}, registering (module=${moduleInstanceId})`);
-			pi.registerProvider(PROVIDER_ID, providerConfig);
-		});
-	}
+		streamSimple: g[ACTIVE_STREAM_SIMPLE_KEY] as any,
+	});
 
 	// --- AskClaude tool ---
 

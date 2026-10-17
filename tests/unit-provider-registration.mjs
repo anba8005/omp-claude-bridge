@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 
 /**
- * Provider registration across module instances (issue #91's foreground failure).
+ * Provider registration across extension loads.
  *
- * The first bridge instance registers the claude-bridge provider at activation.
- * A later instance — a subagent session that loaded this module fresh — must
- * decide at session_start based on who owns its session's model registry:
- * hosts that pass the parent's registry down already have the provider
- * (re-registering would overwrite the parent's pinned stream fn), while hosts
- * that give the child its own registry need it registered or every
- * claude-bridge/* dispatch fails with "Model not found".
+ * omp replays registrations per load: creating a session (a task subagent's,
+ * on the parent's own registry) clears what the bridge's source registered and
+ * applies only what this load queued. A load that skipped registerProvider
+ * deleted the provider for the whole process ("No API key for provider:
+ * claude-bridge" in every subagent). Every load registers — with the stream fn
+ * of the instance already serving, so a freshly evaluated module never points
+ * the shared registry at its own empty state.
  */
 
 import { describe, it } from "node:test";
@@ -50,29 +50,17 @@ describe("provider registration across module instances", () => {
 		assert.equal(registered[0].name, PROVIDER_ID);
 	});
 
-	it("later instance registers at session_start when its registry lacks the provider (#91)", async () => {
-		// A fresh module instance: the activate-time registration is skipped, and
-		// the decision moves to session_start with the session's own registry.
-		const { default: activateFresh } = await import("../src/index.js?own-registry-child");
-		const { registered, emit } = activateWithMockPi(activateFresh);
-		assert.equal(registered.length, 0, "no activation-time registration for a later instance");
-
-		emit("session_start", {}, { modelRegistry: registryWith("other-provider") });
-		assert.equal(registered.length, 1, "session_start registers into the empty registry");
-		assert.equal(registered[0].name, PROVIDER_ID);
-		assert.ok(registered[0].config.streamSimple, "the registration carries this instance's stream fn");
-	});
-
-	it("later instance does not re-register when the registry already has the provider", async () => {
-		const { default: activateFresh } = await import("../src/index.js?shared-registry-child");
-		const { registered, emit } = activateWithMockPi(activateFresh);
-
-		// Host passed the parent's registry down: the provider is already there.
-		emit("session_start", {}, { modelRegistry: registryWith(PROVIDER_ID) });
-		assert.equal(registered.length, 0, "no overwrite of the parent's registration");
-
-		// Repeated session starts stay idempotent.
-		emit("session_start", {}, { modelRegistry: registryWith(PROVIDER_ID) });
-		assert.equal(registered.length, 0, "still no registration on a later session_start");
+	it("every later load registers too, with the serving instance's stream fn", async () => {
+		const first = activateWithMockPi();
+		const served = first.registered[0].config.streamSimple;
+		// The same module loaded again (omp shares it across a parent and its subagents)...
+		const again = activateWithMockPi();
+		assert.equal(again.registered.length, 1, "a load that registers nothing would delete the provider");
+		assert.equal(again.registered[0].config.streamSimple, served);
+		// ...and a freshly evaluated instance.
+		const { default: activateFresh } = await import("../src/index.js?fresh-instance");
+		const fresh = activateWithMockPi(activateFresh);
+		assert.equal(fresh.registered.length, 1);
+		assert.equal(fresh.registered[0].config.streamSimple, served, "the parent's state keeps serving");
 	});
 });
