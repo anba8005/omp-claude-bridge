@@ -24,6 +24,7 @@
 - **Fix: history rewrites are attributed to the session that made them** — a compaction, tree navigation or `/clear` in one session no longer discards or rebuilds another session's query; a subagent sharing the process leaves its parent's conversation alone. Backport of upstream `056d6dd` and `4d5ea50` (issue #101).
 - **Fix: each session gets its own Claude Code session mirror** — one process-wide mirror meant a subagent or a second session took over the parent's Claude Code session or reset its cursor; mirrors are now keyed by omp's session id, so each conversation resumes and rebuilds on its own. Backport of upstream `32f46eb` and `ff1df3f` (issue #101).
 - **Fix: a steer that never reached Claude Code forces a rebuild** — the cursor already counts it, so only a rebuild restores it; the rebuild request now survives the query's completion, including on a first turn with no session mirror yet. Backport of upstream `18e8b68`.
+- **Bump: `@anthropic-ai/claude-agent-sdk` to `^0.3.293`** — Claude Code 2.1.293. `tests/int-cc-contracts.mjs` is re-pinned for it, including the git-snapshot and steer asserts CC 2.1.280 moved. Backport of upstream `a78a2a5` (0.3.284, without its Sonnet 5.5 model entry), `311d2d5`, `050ea19` and `c8ec3ce`.
 
 ## 0.8.0 — 2026-09-20
 
