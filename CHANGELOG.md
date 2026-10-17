@@ -27,6 +27,7 @@
 - **Bump: `@anthropic-ai/claude-agent-sdk` to `^0.3.293`** — Claude Code 2.1.293. `tests/int-cc-contracts.mjs` is re-pinned for it, including the git-snapshot and steer asserts CC 2.1.280 moved. Backport of upstream `a78a2a5` (0.3.284, without its Sonnet 5.5 model entry), `311d2d5`, `050ea19` and `c8ec3ce`.
 - **Fix: thinking tokens reach omp's `usage.reasoningTokens`** — Claude Code reports them under `output_tokens_details.thinking_tokens`; the bridge read a field no SDK version has, so the count never arrived. Token accounting moves to `src/usage.ts`. omp names the counter `reasoningTokens` where pi has `reasoning`. Backport of upstream `de007f9` (elidickinson/pi-claude-bridge#139).
 - **Fix: a missing agent dir can no longer throw out of the stream function** — the diagnostic dump creates its directory itself, even with debug off. Backport of upstream `3489dd9`.
+- **Fix: synthetic failure notices no longer stream as assistant output** — Claude Code reports an API failure or subscription limit as a `<synthetic>` assistant message before the failing result; streamed as text, it made the turn look committed, so omp's retry and model fallback never fired. The notice stays on the failed turn's error event, and one following a stalled stream also drops the dead stream's partial blocks. Backport of upstream `1cb9caf`, `7a7f699` and `df907db` (elidickinson/pi-claude-bridge#163, issue #162).
 
 ## 0.8.0 — 2026-09-20
 
