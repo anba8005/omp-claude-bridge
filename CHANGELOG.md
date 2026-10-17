@@ -31,6 +31,7 @@
 - **Fix: duplicate AGENTS.md instructions** — omp already forwards the project's context files in `<project-context>`, and Claude Code loads `AGENTS.md` natively as well, so the instructions arrived twice; its native copy is excluded, as `CLAUDE.md` already was. Backport of upstream `4f076aa` (issue #151).
 - **Tests: the unit suite runs against a throwaway HOME** — the preload points `HOME`, the agent dir, the session dir, `CLAUDE_CONFIG_DIR` and the bridge log at a temp root, and the config tests swap the agent dir along with `HOME`, so a run can no longer overwrite the developer's real `claude-bridge.json`. Backport of the test half of upstream `e870bc8` (issue #164).
 - **Fix: hang when a stream is cut right after a tool call starts** — tool calls dispatch only once their block closes, so omp no longer gets a `{}`-argument call Claude Code has dropped and re-issued. Backport of upstream `ddce5f8` (elidickinson/pi-claude-bridge#146, thanks @andreypopp).
+- **Fix: a tool result with no parked query resumes the turn** — it ends the turn only when delivered on an aborted request; after a restart, crash, stall or retry it resumes the Claude Code session under a dedicated continue prompt. Backport of upstream `5b514c2`, `c2fbfc8`, `6e1e51e`, `eaa02b9` and the `ed45251` test (elidickinson/pi-claude-bridge#174, issue #192, thanks @jcwasher).
 
 ## 0.8.0 — 2026-09-20
 

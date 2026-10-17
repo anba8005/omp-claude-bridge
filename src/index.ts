@@ -1653,6 +1653,13 @@ const CONTINUE_AFTER_REWRITE_PROMPT =
 	"[Your context was compacted. What precedes this is a summary plus the most recent messages, "
 	+ "ending with the tool result you were waiting for. Continue the task from there.]";
 
+/** The prompt a resumed tool result is opened with: no query of this process
+ *  was parked on it (a restart, a crash, a stall), so the turn goes on from
+ *  history that ends at the result. */
+const CONTINUE_AFTER_RESUME_PROMPT =
+	"[Your session was interrupted and resumed. What precedes this ends with the tool result "
+	+ "you were waiting for. Continue the task from there.]";
+
 /** Drop a Claude Code query parked at a tool boundary whose conversation pi has
  *  since rewritten (/compact, tree navigation).
  *
@@ -1776,8 +1783,15 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// emit end_turn so pi waits for the next real user message. The discard
 	// branch above already siphoned off the stale-query case, which goes on to a
 	// rebuild instead — that one has somewhere to deliver the result to.
+	// Only when this call's own signal is aborted: after an abort during a tool
+	// call, pi calls back with the run's (already aborted) signal. A result that
+	// arrives otherwise -- after a restart (a durable host resuming a run), a
+	// crash, a stall, or an overflow/quota retry -- has no parked query either, and
+	// falls through to the fresh-query path, which resumes the CC session and
+	// delivers it.
 	const lastMsg = context.messages[context.messages.length - 1];
-	if (lastMsg?.role === "toolResult" && !rewrittenUnderQuery) {
+	const unparkedToolResult = lastMsg?.role === "toolResult" && !rewrittenUnderQuery;
+	if (unparkedToolResult && options?.signal?.aborted) {
 		debug(`provider: orphaned tool result after abort, emitting end_turn`);
 		// With no query in flight anywhere, the top-level session this result
 		// belongs to is the one whose turn just ended: its cursor advances to
@@ -1843,6 +1857,9 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// Which pi session this query serves — the attribution key for history
 	// rewrites (session_compact / session_tree) and for SessionState above.
 	const piSessionId = options?.sessionId ?? null;
+	// Read before the consume below: with no query parked (an overflow retried
+	// after compaction), the session's mark is the only sign of the rewrite.
+	const historyRewritten = rewrittenUnderQuery || (piSessionId !== null && historyRewrittenBySession.has(piSessionId));
 	const syncResult = syncSharedSession(context.messages, cwd, customToolNameToSdk, cliModel, piSessionId);
 	// This query starts from the history pi has now: consume this session's
 	// armed rewrite — a sibling pi session's stays armed for its own queries.
@@ -1851,14 +1868,18 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const promptBlocks = extractUserPromptBlocks(context.messages);
 	let promptText = extractUserPrompt(context.messages) ?? "";
 
-	// A turn continuing past a discarded query ends at its tool result, not at a
+	// A turn continuing past a rewrite ends at its tool result, not at a
 	// prompt, so say what happened rather than falling into the empty-prompt
 	// recovery below — that one is for a shape we do not expect, and this is one
 	// we do. The rebuilt session already ends with the tool result, placed after
 	// the tool call it answers.
-	if (rewrittenUnderQuery && !promptText && !promptBlocks) {
+	if (historyRewritten && !promptText && !promptBlocks) {
 		promptText = CONTINUE_AFTER_REWRITE_PROMPT;
 		debug(`provider: continuing the turn after a rewritten history, ${context.messages.length} msgs rebuilt`);
+	}
+	if (unparkedToolResult && !promptText && !promptBlocks) {
+		promptText = CONTINUE_AFTER_RESUME_PROMPT;
+		debug(`provider: resuming the turn at a tool result with no parked query, ${context.messages.length} msgs`);
 	}
 
 	// Guard: empty prompt means the last context message isn't a user message.
