@@ -29,6 +29,7 @@ const newAssistantMessageEventStream: () => AssistantMessageEventStream =
 		? _piAi.createAssistantMessageEventStream
 		: () => new _piAi.AssistantMessageEventStream();
 import { updateUsage, type SdkUsage } from "./usage.js";
+import { rateLimitResponse } from "./rate-limit.js";
 
 // --- Debug logging ---
 // CLAUDE_BRIDGE_DEBUG=1 enables debug logging to <agent dir>/claude-bridge.log
@@ -530,13 +531,28 @@ function resultErrorText(message: SDKMessage): string | undefined {
  *  6:30pm", which matches none of them, so an exhausted quota reads as a fatal error and the
  *  fallback chain never runs (issue #58).
  *
- *  Leading with "Claude rate limit" rather than appending keeps the phrase in any truncated
- *  render, and avoids the `<tool> failed (exit N):` shape that pi-subagents treats as a tool
- *  failure and refuses to retry. */
+ *  Leading with "Claude quota exceeded — rate limit" rather than appending keeps both phrases
+ *  in any truncated render, and avoids the `<tool> failed (exit N):` shape that pi-subagents
+ *  treats as a tool failure and refuses to retry. "quota exceeded" matches omp's usage-limit
+ *  pattern, so omp treats the rejected window as a usage limit (credential switch, model
+ *  fallback) instead of retrying a limit that resets in hours (issue #183). */
 function describeRateLimitFailure(rejection: { rateLimitType?: string; resetsAt?: number }, failure: string): string {
 	const kind = rejection.rateLimitType ? ` (${rejection.rateLimitType})` : "";
 	const resets = rejection.resetsAt ? ` — resets ${new Date(rejection.resetsAt * 1000).toLocaleTimeString()}` : ""; // resetsAt: Unix seconds (unit undocumented in the SDK; observed)
-	return `Claude rate limit${kind}${resets}: ${failure}`;
+	return `Claude quota exceeded — rate limit${kind}${resets}: ${failure}`;
+}
+
+/** Reports to the call that owns the open stream, before its next event, as pi's own
+ *  providers do. A failing consumer must not end the turn it is observing. */
+async function reportHeldRateLimit(c: QueryContext, model: Model<any>): Promise<void> {
+	const info = c.heldRateLimit;
+	if (!info || !c.currentPiStream || !c.currentOnResponse) return;
+	c.heldRateLimit = undefined;
+	try {
+		await c.currentOnResponse(rateLimitResponse(info), model);
+	} catch (error) {
+		debug("rate limit: onResponse failed", error);
+	}
 }
 
 function isolatedStreamFn(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
@@ -1122,11 +1138,12 @@ function markStreamComplete(stream: AssistantMessageEventStream | null): void {
 	if (stream) completedStreams.add(stream as object);
 }
 
-function claimCurrentPiStream(stream: AssistantMessageEventStream, label: string, c: QueryContext): void {
+function claimCurrentPiStream(stream: AssistantMessageEventStream, label: string, c: QueryContext, options: SimpleStreamOptions | undefined): void {
 	if (c.currentPiStream && !completedStreams.has(c.currentPiStream as object)) {
 		debug(`WARNING: currentPiStream overwritten before terminal event (${label}); activeQuery=${Boolean(c.activeQuery)} pendingHandlers=${c.pendingToolCalls.size}`);
 	}
 	c.currentPiStream = stream;
+	c.currentOnResponse = options?.onResponse;
 }
 
 function ensureTurnStarted(c: QueryContext): void {
@@ -1437,6 +1454,7 @@ async function consumeQuery(
 	for await (const message of sdkQuery) {
 		if (RECORD_STREAM_PATH) appendFileSync(RECORD_STREAM_PATH, `${JSON.stringify(message)}\n`);
 		if (wasAborted()) break;
+		await reportHeldRateLimit(queryCtx, model);
 		// Everything below the currentPiStream guard is content, which there is
 		// nowhere to put once a turn has ended on a tool call. These three are not
 		// content and must not share that gate:
@@ -1471,16 +1489,18 @@ async function consumeQuery(
 		if (message.type === "rate_limit_event") {
 			const info = (message as any).rate_limit_info;
 			debug("consumeQuery: rate_limit_event", JSON.stringify(info).slice(0, 300));
+			if (info) queryCtx.heldRateLimit = info;
+			await reportHeldRateLimit(queryCtx, model);
 			if (info?.status === "rejected") {
 				// Held so the failure Claude Code sends next can be named as a rate limit.
 				queryCtx.rateLimitRejection = info;
-				// The "rate limited" notice below supersedes warnings; re-arm so the next
+				// The "rate limit reached" notice below supersedes warnings; re-arm so the next
 				// window's warnings fire even if it opens straight into allowed_warning.
 				queryCtx.lastRateLimitWarnStep = null;
 				queryCtx.lastRateLimitWarnThreshold = undefined;
 				// resetsAt is Unix seconds, not milliseconds.
 				const resetsAt = info.resetsAt ? new Date(info.resetsAt * 1000).toLocaleTimeString() : "unknown";
-				piUI?.notify(`Claude rate limited (${info.rateLimitType ?? "unknown"}) — resets at ${resetsAt}`, "warning");
+				piUI?.notify(`Claude subscription rate limit reached (${info.rateLimitType ?? "unknown"}) — resets at ${resetsAt}`, "warning");
 			} else if (info?.status === "allowed") {
 				// Back under the threshold (window reset) — re-arm the warning dedupe.
 				queryCtx.lastRateLimitWarnStep = null;
@@ -1753,7 +1773,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// (everything after the last assistant message) and match against waiting MCP
 	// handlers. Results that arrive before their handler get queued in pendingResults.
 	if (resultCtx) {
-		claimCurrentPiStream(stream, "tool-result", resultCtx);
+		claimCurrentPiStream(stream, "tool-result", resultCtx, options);
 		resultCtx.resetTurnState(model);
 		// A rewrite that armed the mark after this query parked gets copied here,
 		// though markRebuildForSession usually reaches it directly.
@@ -1832,7 +1852,9 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 
 	// 2. Fresh child context — constructor already gave us clean Maps and empty
 	//    arrays. For a reused top-level context, clear explicitly.
-	claimCurrentPiStream(stream, "fresh-query", queryCtx);
+	claimCurrentPiStream(stream, "fresh-query", queryCtx, options);
+	// A held event belongs to the query that received it, not to this request.
+	queryCtx.heldRateLimit = undefined;
 	queryCtx.pendingToolCalls.clear();
 	queryCtx.pendingResults.clear();
 	// Stale ids would let a late result from the previous query route here via
@@ -2028,6 +2050,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 				markStreamComplete(stream);
 				stream?.end();
 				queryCtx.currentPiStream = null;
+				queryCtx.heldRateLimit = undefined;
 				return;
 			}
 
@@ -2082,6 +2105,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			if ((wasAborted || options?.signal?.aborted)) {
 				const state = sessionStateFor(queryCtx.piSessionId);
 				if (state) setSessionStateFor(queryCtx.piSessionId, { ...state, needsRebuild: true, forceRotate: true });
+				queryCtx.heldRateLimit = undefined;
 			} else {
 				// Drop this session's mirror: its conversation is in an unknown
 				// state after the error. Other sessions' mirrors stay — one
