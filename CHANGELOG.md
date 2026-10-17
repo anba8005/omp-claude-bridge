@@ -23,6 +23,7 @@
 - **Fix: a query parked under a history rewrite restarts from the rewritten history** — omp compacts at turn boundaries inside a run, so a query parked at a tool boundary could be handed the shrunk conversation, which looped one compaction per tool call. The parked query is now discarded and restarted from the rewritten history, and the rewrite flag clears when a run completes. Backport of upstream `7bea2b3` and `21b262f` (elidickinson/pi-claude-bridge#128, issue #101, thanks @andreypopp).
 - **Fix: history rewrites are attributed to the session that made them** — a compaction, tree navigation or `/clear` in one session no longer discards or rebuilds another session's query; a subagent sharing the process leaves its parent's conversation alone. Backport of upstream `056d6dd` and `4d5ea50` (issue #101).
 - **Fix: each session gets its own Claude Code session mirror** — one process-wide mirror meant a subagent or a second session took over the parent's Claude Code session or reset its cursor; mirrors are now keyed by omp's session id, so each conversation resumes and rebuilds on its own. Backport of upstream `32f46eb` and `ff1df3f` (issue #101).
+- **Fix: a steer that never reached Claude Code forces a rebuild** — the cursor already counts it, so only a rebuild restores it; the rebuild request now survives the query's completion, including on a first turn with no session mirror yet. Backport of upstream `18e8b68`.
 
 ## 0.8.0 — 2026-09-20
 
