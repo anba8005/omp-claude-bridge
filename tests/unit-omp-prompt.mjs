@@ -62,6 +62,24 @@ const PROJECT = [
 
 const EXTENSION = "EXTENSION BLOCK: remember to cite sources.";
 
+// The next omp template, rewritten so neither marker matches.
+const DRIFTED_HARNESS = HARNESS
+	.replace(/^RFC 2119 keywords:[^\n]*\n/, "Keywords follow RFC 2119.\n")
+	.replace("You are omp's trusted coding assistant.", "You are a trusted coding assistant.");
+
+// A subagent's own block, as omp 18.11.3 renders it: the same § layout as the harness.
+const SUBAGENT = [
+	"§ Role",
+	"Worker agent: delegated tasks.",
+	"",
+	"§ Context",
+	"Read README.md.",
+	"§ Coop",
+	"You are operating on a piece of work assigned to you by the main agent.",
+	"§ Completion",
+	"No TODO tracking, no progress updates. Execute; report results with `yield`.",
+].join("\n");
+
 describe("projectOmpSystemPrompt", () => {
 	it("keeps omp's harness out and forwards every other block verbatim", () => {
 		const append = projectOmpSystemPrompt([HARNESS, PROJECT, EXTENSION], { skillReadTool: "mcp" });
@@ -92,6 +110,19 @@ describe("projectOmpSystemPrompt", () => {
 		assert.equal(isOmpHarnessBlock(custom), false);
 		const append = projectOmpSystemPrompt([custom, PROJECT], { skillReadTool: "mcp" });
 		assert.ok(append.startsWith(custom));
+	});
+
+	it("refuses to forward omp's harness once its markers stop matching", () => {
+		assert.equal(isOmpHarnessBlock(DRIFTED_HARNESS), false, "premise: neither marker matches");
+		assert.throws(() => projectOmpSystemPrompt([DRIFTED_HARNESS, PROJECT], { skillReadTool: "mcp" }), /§ Runtime/);
+		const append = projectOmpSystemPrompt([HARNESS, PROJECT, SUBAGENT], { skillReadTool: "mcp" });
+		assert.ok(append.includes(SUBAGENT), "a subagent's own sections are not the harness");
+	});
+
+	it("leaves the user's context files alone, whatever they quote", () => {
+		const project = PROJECT.replace("Always write tests first.", "§ Workflow\nAlways write tests first.");
+		const append = projectOmpSystemPrompt([HARNESS, project], { skillReadTool: "mcp" });
+		assert.ok(append.includes(project));
 	});
 
 	it("emits nothing for an empty prompt", () => {

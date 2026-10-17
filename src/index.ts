@@ -1862,9 +1862,23 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// subagent's own prompt and an extension's added block all reach Claude Code as
 	// they reached the turn. omp's harness itself stays behind (see omp-prompt.ts).
 	const systemPromptBlocks = context.systemPrompt as unknown as string | string[] | undefined;
-	const systemPromptAppend = projectOmpSystemPrompt(systemPromptBlocks, {
-		skillReadTool: mcpTools.some((tool) => tool.name === "read") ? "mcp" : "none",
-	});
+	let systemPromptAppend: string | undefined;
+	try {
+		systemPromptAppend = projectOmpSystemPrompt(systemPromptBlocks, {
+			skillReadTool: mcpTools.some((tool) => tool.name === "read") ? "mcp" : "none",
+		});
+	} catch (error) {
+		// omp's harness outgrew the markers (see omp-prompt.ts). Fail the call before
+		// Claude Code starts and before this turn claims any session state; the empty
+		// failed turn is one omp can walk retry.fallbackChains from.
+		const message = error instanceof Error ? error.message : String(error);
+		debug(`provider: ${message}`);
+		queueMicrotask(() => {
+			stream.push({ type: "error", reason: "error", error: newAssistantOutput(model, "", "error", message) });
+			stream.end();
+		});
+		return stream;
+	}
 
 	// 2. Fresh child context — constructor already gave us clean Maps and empty
 	//    arrays. For a reused top-level context, clear explicitly.

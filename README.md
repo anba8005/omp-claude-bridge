@@ -38,6 +38,7 @@ Claude Code keeps its own `claude_code` system prompt; omp's prompt is appended 
 
 - **omp's harness block** (the "You are omp's trusted coding assistant" template) is not forwarded — it describes omp's own tool loop. Only its `<skills>`, `<generic-rules>` and `<domain-rules>` sections are carried over. Skills and domain rules are listed with an instruction to read `skill://<name>` / `rule://<name>` through the bridged `read` tool, and are left out when `read` is not available.
 - **Everything else is forwarded verbatim**: the `<project-context>` block (your `AGENTS.md`/`CLAUDE.md` context files, workstation, workspace roots), blocks other extensions add in `before_agent_start`, and a custom system prompt if you set one.
+- **If omp's harness gets past the markers, the turn fails instead.** omp's harness is recognized by its preamble and role line. A forwarded block that still carries harness section lines (`src/omp-prompt.ts` `HARNESS_SIGNATURES`) means omp's template changed under the bridge. The call then fails before Claude Code starts, with an empty turn that `retry.fallbackChains` can switch away from. `<project-context>` is never checked.
 - **Nothing from Claude Code's own settings**: the provider runs Claude Code without `~/.claude/settings.json` or the project's `.claude/settings*.json` — no hooks, plugins, output style, permissions or `CLAUDE.md` of its own. An `env` block or `apiKeyHelper` there (Bedrock, Vertex) is not read either; set those variables in omp's environment.
 
 ### Summaries, `/clear`, and session switches
@@ -104,6 +105,7 @@ Config: `~/.omp/agent/claude-bridge.json` (global) or `.omp/claude-bridge.json` 
 
 - `npm run test:unit` — offline tests (`tests/unit-*.mjs`).
 - `node tests/omp-smoke.mjs` — loads the extension in your installed omp and checks the registered models. Makes no model call.
+- `node --import tsx tests/omp-prompt-smoke.mjs` — run after every omp upgrade. Drives your installed omp through the bridge, for a session turn and a subagent, against a local stub API (stub key, no traffic to Anthropic, memory off), and checks that omp's harness is recognized and none of it reaches Claude Code.
 - `npm test` — upstream's integration suite (`tests/int-*.{sh,mjs}`). It drives `pi`, not omp, and makes real Claude Code calls, so it does not validate this port; it is kept for upstream merges.
 
 ## Debugging

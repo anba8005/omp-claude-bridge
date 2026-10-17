@@ -18,6 +18,9 @@
 // Blocks other than the harness are forwarded verbatim. That keeps whatever an
 // extension added, which is the instruction loss upstream's capture registry
 // existed to prevent: a turn that silently drops policy the user wrote down.
+// The one exception fails closed: a forwarded block that still carries the
+// harness (HARNESS_SIGNATURES) means omp's template outgrew the markers, and the
+// projection throws rather than ship it.
 
 import { MCP_TOOL_PREFIX } from "./skills.js";
 
@@ -46,6 +49,31 @@ const HARNESS_MARKERS = [/^RFC 2119 keywords:/, /\bYou are omp's\b/];
 
 export function isOmpHarnessBlock(block: string): boolean {
 	return HARNESS_MARKERS.some((marker) => marker.test(block));
+}
+
+// Lines only omp's harness carries. A template change that drops both markers
+// would otherwise ship the whole harness as an ordinary block, so a forwarded
+// block carrying any of these is refused rather than sent. The § sections a
+// subagent's own block uses (Role, Context, Coop, Completion) are not here, and
+// `<project-context>` is not checked: it holds the user's context files, which
+// may quote anything.
+export const HARNESS_SIGNATURES = [
+	/^RFC 2119 keywords:/m,
+	/\bYou are omp's\b/,
+	/^§ Runtime$/m,
+	/^§ Tool Policy$/m,
+	/^§ Workflow$/m,
+	/^§ Delivery$/m,
+];
+
+function refuseHarness(block: string): void {
+	const found = HARNESS_SIGNATURES.find((signature) => signature.test(block));
+	if (!found) return;
+	const line = block.match(found)![0];
+	throw new Error(
+		`claude-bridge refused to send omp's system prompt to Claude Code: it carries omp's harness ("${line}"). ` +
+		"omp's prompt template changed; update HARNESS_MARKERS in src/omp-prompt.ts.",
+	);
 }
 
 const PROJECT_CONTEXT_OPEN = "<project-context>";
@@ -105,7 +133,10 @@ export function projectOmpSystemPrompt(
 	const parts: string[] = [];
 	for (const block of systemPromptBlocks(systemPrompt)) {
 		if (isOmpHarnessBlock(block)) parts.push(...harnessSections(block, options.skillReadTool));
-		else parts.push(block.trim());
+		else {
+			if (!isProjectContextBlock(block)) refuseHarness(block);
+			parts.push(block.trim());
+		}
 	}
 	return parts.length > 0 ? parts.join("\n\n") : undefined;
 }
