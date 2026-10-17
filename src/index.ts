@@ -70,11 +70,10 @@ const CC_CHILD_ENV = {
 // while rules need their own. Managed/policy memory is not excludable by design.
 const CLAUDE_MD_EXCLUDES = ["**/CLAUDE.md", "**/.claude/rules/**"];
 
-// Ensure log directories exist when debug is enabled
+// Ensure the debug log directory exists when debug is enabled
 if (DEBUG) {
 	try {
 		mkdirSync(dirname(DEBUG_LOG_PATH), { recursive: true });
-		mkdirSync(dirname(DIAG_LOG_PATH), { recursive: true });
 	} catch {
 		// If directory creation fails, debug functions will throw on first use
 	}
@@ -121,10 +120,12 @@ function makeCliDebugOptions(tag: string): { debug?: boolean; debugFile?: string
 	};
 }
 
-/** Unconditional diagnostic dump — for "should never happen" paths */
+/** Unconditional diagnostic dump — for "should never happen" paths. Creates pi's agent
+ *  dir itself: callers run inside streamSimple, where a missing dir must not throw. */
 function diagDump(label: string, data: Record<string, unknown>) {
 	const ts = new Date().toISOString();
 	const entry = { ts, moduleInstanceId, label, ...data };
+	mkdirSync(dirname(DIAG_LOG_PATH), { recursive: true });
 	appendFileSync(DIAG_LOG_PATH, JSON.stringify(entry) + "\n");
 	debug(`DIAG: ${label} (see ${DIAG_LOG_PATH})`);
 }

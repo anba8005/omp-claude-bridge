@@ -26,6 +26,7 @@
 - **Fix: a steer that never reached Claude Code forces a rebuild** — the cursor already counts it, so only a rebuild restores it; the rebuild request now survives the query's completion, including on a first turn with no session mirror yet. Backport of upstream `18e8b68`.
 - **Bump: `@anthropic-ai/claude-agent-sdk` to `^0.3.293`** — Claude Code 2.1.293. `tests/int-cc-contracts.mjs` is re-pinned for it, including the git-snapshot and steer asserts CC 2.1.280 moved. Backport of upstream `a78a2a5` (0.3.284, without its Sonnet 5.5 model entry), `311d2d5`, `050ea19` and `c8ec3ce`.
 - **Fix: thinking tokens reach omp's `usage.reasoningTokens`** — Claude Code reports them under `output_tokens_details.thinking_tokens`; the bridge read a field no SDK version has, so the count never arrived. Token accounting moves to `src/usage.ts`. omp names the counter `reasoningTokens` where pi has `reasoning`. Backport of upstream `de007f9` (elidickinson/pi-claude-bridge#139).
+- **Fix: a missing agent dir can no longer throw out of the stream function** — the diagnostic dump creates its directory itself, even with debug off. Backport of upstream `3489dd9`.
 
 ## 0.8.0 — 2026-09-20
 
