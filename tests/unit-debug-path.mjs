@@ -7,6 +7,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { globalConfigPath } from "../src/config.js";
 
 describe("test harness", () => {
 	it("redirects the bridge debug log away from the real one", () => {
@@ -19,5 +21,13 @@ describe("test harness", () => {
 			join(homedir(), ".pi", "agent", "claude-bridge.log"),
 			"debug log must not resolve to the real one",
 		);
+	});
+
+	it("keeps every path-derived location inside the temp root", () => {
+		const root = process.env.HOME;
+		assert.ok(root, "HOME must be set — is tests/lib/setup.mjs still preloaded via --import?");
+		for (const path of [homedir(), getAgentDir(), globalConfigPath(), process.env.CLAUDE_CONFIG_DIR, process.env.CLAUDE_BRIDGE_DEBUG_PATH]) {
+			assert.ok(path?.startsWith(root), `${path} must live under ${root}`);
+		}
 	});
 });
