@@ -41,3 +41,16 @@ export function toBridgeContext(context: Context): Context {
 		.map((message) => (message.role === "developer" ? { ...message, role: "user" } : message));
 	return { ...context, messages: normalized as unknown as Context["messages"] };
 }
+
+/**
+ * Identity of a conversation: its first message's role and timestamp (its content
+ * when untimed). Lets the session sync tell the conversation it mirrors, arriving
+ * rewound, from another conversation (a subagent, an AskClaude child).
+ */
+export function conversationOrigin(messages: Context["messages"]): string | undefined {
+	const first = messages[0] as { role?: string; timestamp?: number; content?: unknown } | undefined;
+	if (!first) return undefined;
+	return first.timestamp !== undefined
+		? `${first.role}@${first.timestamp}`
+		: `${first.role}:${JSON.stringify(first.content ?? "").slice(0, 200)}`;
+}

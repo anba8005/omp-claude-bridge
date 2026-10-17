@@ -20,7 +20,7 @@ import { isOneOffRequest, projectOmpSystemPrompt, systemPromptText } from "./omp
 import { collectCarriedAttachments, placeCarriedAttachments, type CarriedAttachment } from "./attachments.js";
 import { createToolServer } from "./mcp-server.js";
 import { buildActionSummary, type ToolCallState } from "./askclaude-ui.js";
-import { latestResetBoundaryId, toBridgeContext } from "./host-context.js";
+import { conversationOrigin, latestResetBoundaryId, toBridgeContext } from "./host-context.js";
 
 // Compat (#2): use factory if available (pi-ai ≥0.66), else fall back to constructor (gsd-pi etc.)
 const _piAi = piAi as any;
@@ -202,6 +202,12 @@ interface SessionState {
 	// this — there's no concurrent CC writer during those events, so
 	// in-place rebuild (preserve UUID, deleteSession + createSession) is safe.
 	forceRotate?: boolean;
+	// Which conversation the session mirrors: conversationOrigin() of the history it was
+	// built or last resumed from. A shorter history from the same conversation is that
+	// conversation rewound (omp drops a reply that stopped without actionable output and
+	// retries with a reminder) and must rebuild; one from another conversation is a
+	// subagent or AskClaude child and must leave the session alone.
+	origin?: string;
 }
 
 /**
@@ -669,8 +675,11 @@ function syncSharedSession(
 	// (/compact, session_tree, /clear, /new, /resume, /fork, /branch) always set
 	// needsRebuild or clear sharedSession before the next syncSharedSession call.
 	// /clear fires no event under omp; the before_agent_start reset_boundary check
-	// in the default export is what keeps it out of this branch.
-	if (sharedSession && !sharedSession.needsRebuild && priorMessages.length < sharedSession.cursor) {
+	// in the default export is what keeps it out of this branch. The same conversation
+	// arriving shorter without an event (omp's retry after a reply with no actionable
+	// output drops that reply) is told apart by its origin and rebuilt below.
+	const sameConversation = sharedSession?.origin !== undefined && sharedSession.origin === conversationOrigin(messages);
+	if (sharedSession && !sharedSession.needsRebuild && priorMessages.length < sharedSession.cursor && !sameConversation) {
 		debug(`Case 1 synthetic: clean start for shorter context, preserving shared session ${sharedSession.sessionId.slice(0, 8)}, cursor=${sharedSession.cursor}`);
 		debug(`syncResult: path=clean-start preserve-shared sessionId=${sharedSession.sessionId} cursor=${sharedSession.cursor}`);
 		return { sessionId: null, preserveSharedSession: true };
@@ -706,7 +715,7 @@ function syncSharedSession(
 	// records, not messages: `messages` filters out the attachment records that
 	// carrying an `@file` expansion across a rebuild writes into the same file.
 	verifyWrittenSession(session.jsonlPath, session.sessionId, session.records.length, cwd);
-	sharedSession = { sessionId: session.sessionId, cursor: priorMessages.length, cwd };
+	sharedSession = { sessionId: session.sessionId, cursor: priorMessages.length, cwd, origin: conversationOrigin(messages) };
 	if (previousSessionId === undefined) {
 		debug(`Case 2: first turn with ${priorMessages.length} prior messages → session ${session.sessionId.slice(0, 8)}, ${session.records.length} records`);
 	} else if (preserveId) {
@@ -735,6 +744,7 @@ export const __test = {
 		piUI = ui;
 	},
 	toBridgeContext,
+	conversationOrigin,
 	syncSharedSession,
 	extractUserPromptBlocks,
 	consumeQuery,
@@ -1676,7 +1686,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			} else if (sessionId) {
 				const cursor = Math.max(context.messages.length, queryCtx.latestCursor, sharedSession?.cursor ?? 0);
 				debug(`provider: query done, session=${sessionId.slice(0, 8)}, cursor=${cursor}`);
-				sharedSession = { sessionId, cursor, cwd };
+				sharedSession = { sessionId, cursor, cwd, origin: conversationOrigin(context.messages) };
 			}
 
 			if (!isReentrant && queryCtx.activeQuery === sdkQuery) {

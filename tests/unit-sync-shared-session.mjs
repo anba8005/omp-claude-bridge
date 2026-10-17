@@ -40,6 +40,49 @@ describe("syncSharedSession", () => {
 		}
 	});
 
+	// omp retries a reply that stopped without actionable output by dropping that reply and
+	// appending a reminder, so the same conversation arrives shorter than the cursor with no
+	// event to mark it. It must rebuild from what omp still has — not take the subagent
+	// branch, which runs the turn with no history at all.
+	it("rebuilds when its own conversation arrives rewound, but leaves the session to a foreign one", () => {
+		const cwd = mkdtempSync(join(tmpdir(), "sync-shared-session-"));
+		const sessionId = randomUUID();
+		const t0 = 1_760_000_000_000;
+		const history = [
+			{ role: "user", content: "Hi", timestamp: t0 },
+			{ role: "assistant", content: [{ type: "text", text: "Hello." }], timestamp: t0 + 1 },
+			{ role: "user", content: "Do the thing", timestamp: t0 + 2 },
+		];
+		try {
+			const seeded = createSession({ sessionId, projectPath: cwd });
+			seeded.importMessages([
+				{ role: "user", content: "Hi" },
+				{ role: "assistant", content: [{ type: "text", text: "Hello." }] },
+			]);
+			seeded.save();
+			const shared = { sessionId, cursor: 3, cwd, origin: __test.conversationOrigin(history) };
+
+			__test.setSharedSession(shared);
+			const subagent = __test.syncSharedSession([{ role: "user", content: "Search the repo", timestamp: t0 + 50 }], cwd);
+			assert.equal(subagent.sessionId, null);
+			assert.equal(subagent.preserveSharedSession, true, "another conversation must not touch the shared session");
+
+			__test.setSharedSession(shared);
+			const retry = __test.syncSharedSession(
+				[...history, { role: "user", content: "Stopped without actionable output", timestamp: t0 + 4 }],
+				cwd,
+			);
+			assert.equal(retry.sessionId, sessionId, "the rewound conversation rebuilds in place and resumes");
+			assert.equal(retry.preserveSharedSession, undefined);
+			assert.equal(__test.getSharedSession()?.cursor, 2);
+			const session = openSession({ sessionId, projectPath: cwd });
+			assert.deepEqual(session.messages.map((m) => m.type), ["user", "assistant"], "the retry keeps its history");
+		} finally {
+			deleteSession(sessionId, cwd);
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
 	// An empty developer message (omp sends ones that carry only provider controls) is skipped
 	// on the wire. It must not count toward the cursor either, or the next turn's reuse check
 	// (priors >= cursor) sees a message Claude Code never got and rebuilds every turn.
