@@ -120,6 +120,16 @@ Set `CLAUDE_BRIDGE_DEBUG=1` to enable debug output:
 
 **Exported Anthropic environment variables override the Claude Code child.** An `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` exported for another gateway redirects Claude Code as well, and every turn fails with that gateway's auth error. Unset them for the omp process.
 
+## Release
+
+Published from the `omp` branch by the **Publish omp-claude-bridge** GitHub workflow (manual dispatch). Versions are CalVer: the release date `YYYY.M.D`, then `YYYY.M.D-post.N` for further releases the same day. The repo's `package.json` stays upstream's; `publish/stage.mjs` writes the published manifest from `publish/package.template.json`, runs the typecheck and unit suite, packs the tarball, installs it, and loads it in omp. Run it locally with:
+
+```
+node publish/stage.mjs --version 2026.10.17
+```
+
+The workflow publishes with npm provenance (trusted publishing), or with an `NPM_TOKEN` secret if one is set.
+
 ## Credits
 
 Eli Dickinson's [pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge), itself based on [claude-agent-sdk-pi](https://github.com/prateekmedia/claude-agent-sdk-pi) by Prateek Sunal. MIT licensed.

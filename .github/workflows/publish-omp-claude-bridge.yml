@@ -1,0 +1,68 @@
+name: Publish omp-claude-bridge
+
+# Publishes `@thealtoclef/omp-claude-bridge` from the `omp` branch of a fork of
+# elidickinson/pi-claude-bridge.
+#
+# The repo's package.json is upstream's own (pi-claude-bridge, pi peers). The
+# publishable manifest is an overlay written by publish/stage.mjs, so upstream's
+# file never carries release-only fields and a rebase cannot conflict on them.
+#
+# `if:` deliberately matches a fork, not the upstream repository: an upstream
+# push must never publish this scope. Manual dispatch only: versions use the
+# release date YYYY.M.D, then YYYY.M.D-post.N for further releases that day.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "CalVer YYYY.M.D; same-day releases use YYYY.M.D-post.N, e.g. 2026.10.17-post.1"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    if: github.repository != 'elidickinson/pi-claude-bridge'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      # The release gate loads the packed tarball in a real omp: omp serves the
+      # extension's @earendil-works/* imports from its own bundled packages, so
+      # an incompatibility there fails only inside omp, never in the unit suite.
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install omp
+        run: |
+          bun install -g @oh-my-pi/pi-coding-agent
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+
+      # Typechecks, runs the unit suite against the source tree, stages the
+      # publishable copy with the overlay manifest, prints the exact tarball
+      # contents, then installs that tarball and loads it in omp.
+      - name: Stage and validate
+        run: node publish/stage.mjs --version "${{ inputs.version }}" --require-omp
+
+      - name: Publish
+        working-directory: dist/omp-claude-bridge-stage/omp-claude-bridge
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if npm view "$(node -p "require('./package.json').name")@$(node -p "require('./package.json').version")" version >/dev/null 2>&1; then
+            echo "::notice::already published; nothing to do"
+            exit 0
+          fi
+          if [ -n "${NPM_TOKEN:-}" ]; then
+            npm config set //registry.npmjs.org/:_authToken "$NPM_TOKEN"
+          fi
+          npm publish --access public --provenance --tag latest

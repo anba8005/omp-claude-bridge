@@ -1,0 +1,41 @@
+{
+  "name": "@thealtoclef/omp-claude-bridge",
+  "version": "0.0.0",
+  "private": false,
+  "description": "Claude Code (via the Agent SDK) as a model provider for the omp coding agent, plus an AskClaude tool. An omp port of pi-claude-bridge.",
+  "keywords": [
+    "omp",
+    "oh-my-pi",
+    "extension",
+    "claude-code",
+    "claude-agent-sdk"
+  ],
+  "author": "Eli Dickinson",
+  "contributors": [
+    "thealtoclef (omp port)"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thealtoclef/pi-claude-bridge.git"
+  },
+  "homepage": "https://github.com/thealtoclef/pi-claude-bridge/tree/omp#readme",
+  "bugs": {
+    "url": "https://github.com/thealtoclef/pi-claude-bridge/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE",
+    "assets"
+  ],
+  "omp": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  }
+}

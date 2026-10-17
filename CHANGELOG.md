@@ -1,6 +1,6 @@
 # Changelog
 
-`@thealtoclef/omp-claude-bridge` is the omp port of [pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge), forked from upstream tag [`v0.8.0`](https://github.com/elidickinson/pi-claude-bridge/releases/tag/v0.8.0) (`d3cb25e`). Sections from `0.8.0` down are upstream's history before the fork. An entry carrying an upstream change cites the upstream commit, PR or tag it came from.
+`@thealtoclef/omp-claude-bridge` is the omp port of [pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge), forked from upstream tag [`v0.8.0`](https://github.com/elidickinson/pi-claude-bridge/releases/tag/v0.8.0) (`d3cb25e`). Releases are versioned by CalVer — `YYYY.M.D`, then `YYYY.M.D-post.N` for further releases the same day; sections from `0.8.0` down are upstream's history before the fork. An entry carrying an upstream change cites the upstream commit, PR or tag it came from.
 
 ## UNRELEASED
 
@@ -17,6 +17,7 @@
 - **Tests: omp shapes** — new suites for prompt projection, developer messages and reset boundaries, and effort mapping; pi-only suites for the removed capture, transcript replay, AGENTS.md loader and branch-summary takeover are deleted.
 - **Add: models are Claude Code's `opus`, `sonnet` and `haiku` aliases** — the bridge registers `claude-bridge/opus`, `claude-bridge/sonnet` and `claude-bridge/haiku` and passes the alias to Claude Code as-is, which resolves it to the newest model of the family (today Opus 5.5, Sonnet 5.5 and Haiku 5.5) with the 1M context window by default, so no `[1m]` suffix is sent and a new model needs no bridge or omp update. Each is registered with 1M context, 128K output and every effort level (low..max); omp's thinking level is sent as Claude Code's effort, minimal as low. Replaces upstream's catalog-driven model list and its measured-1M list, so upstream's later per-model entries (Opus 5.5 in `5919fff`, Sonnet 5.5 in `a78a2a5`, Haiku 5.5 in `265e166`) are not backported.
 - **Remove: `provider.plan`, `provider.longContextExtraUsage` and `provider.forceTwoHundredK`** — they gated `[1m]` ids on older models the bridge no longer registers; the startup notice no longer asks for `provider.plan`.
+- **Add: npm release flow** — `publish/stage.mjs` (CalVer gate, overlay manifest, typecheck, unit suite, pack, install-and-load in omp via `tests/omp-smoke.mjs`) and a dispatch-only GitHub workflow that never runs in the upstream repository; `tests/unit-publish-stage.mjs` covers the overlay.
 
 ## 0.8.0 — 2026-09-20
 

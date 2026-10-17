@@ -56,14 +56,12 @@ Tags: `Add`, `Fix`, `Refactor`, `Tests`, `Bump`, `Deprecate`, `Remove`.
 
 ## Release
 
-No build step — the package ships `src` TypeScript as-is (see `files` in `package.json`). To cut version `X.Y.Z`:
+The `omp` branch publishes `@thealtoclef/omp-claude-bridge`; upstream's `package.json` (name, version, pi peers) is left alone and the published manifest is an overlay (`publish/package.template.json`, written by `publish/stage.mjs`). No build step — `src` TypeScript ships as-is. To cut a release:
 
-1. **Changelog** — rename the `## UNRELEASED` section to `## X.Y.Z — YYYY-MM-DD`.
-2. **Bump** — set `version` to `X.Y.Z` in `package.json`.
-3. **Commit** — `git commit -m "Release X.Y.Z"` (changelog + package.json only).
-4. **Tag** — `git tag vX.Y.Z` (note the `v` prefix).
-5. **Push commit and tag together** — `git push --follow-tags`. 
-6. **Publish** — `npm login` and `npm publish`.
+1. **Changelog** — rename the `## UNRELEASED` section to `## YYYY.M.D — YYYY-MM-DD` (CalVer; a second release that day is `YYYY.M.D-post.N`).
+2. **Commit** — the changelog only; `package.json`'s version is not bumped.
+3. **Validate locally** — `node publish/stage.mjs --version YYYY.M.D` (typecheck, unit suite, pack, install the tarball and load it in omp).
+4. **Publish** — dispatch the *Publish omp-claude-bridge* workflow with the same version. It refuses to run in the upstream repository.
 
 ## Tests
 
