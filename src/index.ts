@@ -1684,7 +1684,11 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 				}
 				debug(`provider: query done, ignoring captured session ${capturedSessionId?.slice(0, 8) ?? "none"} to preserve shared session`);
 			} else if (sessionId) {
-				const cursor = Math.max(context.messages.length, queryCtx.latestCursor, sharedSession?.cursor ?? 0);
+				// The prior cursor counts only for the session it belongs to: after a clean start
+				// (first turn after /clear) the captured session is new, and carrying the old,
+				// longer cursor made the next turn read as a rewound history and rebuild.
+				const priorCursor = sharedSession?.sessionId === sessionId ? sharedSession.cursor : 0;
+				const cursor = Math.max(context.messages.length, queryCtx.latestCursor, priorCursor);
 				debug(`provider: query done, session=${sessionId.slice(0, 8)}, cursor=${cursor}`);
 				sharedSession = { sessionId, cursor, cwd, origin: conversationOrigin(context.messages) };
 			}
