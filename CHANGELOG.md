@@ -2,7 +2,7 @@
 
 `@thealtoclef/omp-claude-bridge` is the omp port of [pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge), forked from upstream tag [`v0.8.0`](https://github.com/elidickinson/pi-claude-bridge/releases/tag/v0.8.0) (`d3cb25e`). Releases are versioned by CalVer — `YYYY.M.D`, then `YYYY.M.D-post.N` for further releases the same day; sections from `0.8.0` down are upstream's history before the fork. An entry carrying an upstream change cites the upstream commit, PR or tag it came from.
 
-## UNRELEASED
+## 2026.10.17 — 2026-10-17
 
 - **Add: omp port, published as `@thealtoclef/omp-claude-bridge`** — forked from 0.8.0 and moved onto omp 18.8's provider contract; the package registers only an `omp.extensions` entry (pi users have upstream). Config, the bridge log and CC CLI logs move under omp's agent dir (`~/.omp/agent`, project `.omp/`).
 - **Refactor: omp's system prompt is projected per call** — the prompt-capture registry (keyed at `before_agent_start`, which omp's `systemPromptOptions`-less events cannot feed) and the AGENTS.md loader are replaced by a stateless projection of `context.systemPrompt` blocks (`src/omp-prompt.ts`): omp's harness block is dropped except its `<skills>`, `<generic-rules>` and `<domain-rules>` sections (skills and domain rules only when the bridged `read` tool can open `skill://`/`rule://`), and every other block — `<project-context>` with the context files, extension-added blocks, a custom prompt — is appended verbatim.
