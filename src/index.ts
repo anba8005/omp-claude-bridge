@@ -139,6 +139,11 @@ function diagDump(label: string, data: Record<string, unknown>) {
 // see the "--- Provider ---" block in activate() below.
 const ACTIVE_STREAM_SIMPLE_KEY = Symbol.for("claude-bridge:activeStreamSimple");
 
+/** omp marks a spawned session's context `agent.kind: "sub"` (task subagents, /tan clones). */
+function isSubagent(ctx: unknown): boolean {
+	return (ctx as { agent?: { kind?: string } } | undefined)?.agent?.kind === "sub";
+}
+
 // Claude Code's own builtin tools, for the AskClaude path where CC really runs
 // them. The provider path never sees these — it starts CC with `tools: []`.
 const SDK_TO_PI_TOOL_NAME: Record<string, string> = {
@@ -894,6 +899,9 @@ export const __test = {
 	},
 	setPiUI(ui: ExtensionUIContext | null) {
 		piUI = ui;
+	},
+	getPiUI() {
+		return piUI;
 	},
 	toBridgeContext,
 	conversationOrigin,
@@ -2387,8 +2395,11 @@ export default function (pi: ExtensionAPI) {
 		seenResetBoundaryId = undefined;
 	};
 	pi.on("session_start", (event, ctx) => {
-		piUI = ctx.ui;
-		piMode = ctx.mode;
+		// The module is shared with subagents' sessions; notices belong to the main one.
+		if (!isSubagent(ctx)) {
+			piUI = ctx.ui;
+			piMode = ctx.mode;
+		}
 		// pi re-emits session_start with a reason on /new, /resume and /fork; omp emits it
 		// once per runner, without one.
 		const reason = (event as { reason?: string } | undefined)?.reason;
@@ -2398,7 +2409,15 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("session_switch" as any, (event: { reason?: string }) => forgetSession(`session_switch:${event?.reason ?? "?"}`));
 	pi.on("session_branch" as any, (event: { reason?: string }) => forgetSession(`session_branch:${event?.reason ?? "?"}`));
-	pi.on("session_shutdown", () => {
+	pi.on("session_shutdown", (_event, ctx) => {
+		// omp shuts a task subagent's session down while its parent runs on: drop only
+		// that session's mirror. The main session's shutdown takes every mirror with it.
+		if (isSubagent(ctx)) {
+			const id = ctx.sessionManager.getSessionId();
+			debug(`session_shutdown: subagent session ${id.slice(0, 8)}, dropping its mirror only`);
+			setSessionStateFor(id, null);
+			return;
+		}
 		reportLeaks("session_shutdown");
 		clearSession("session_shutdown");
 	});
