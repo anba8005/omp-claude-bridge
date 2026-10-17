@@ -1,6 +1,6 @@
 // User-facing extension config. Loaded once at extension registration from
-// the global agent dir (getAgentDir(), e.g. ~/.pi/agent/claude-bridge.json)
-// and the project Pi config directory, project overriding global. Missing or
+// the global agent dir (getAgentDir(), e.g. ~/.omp/agent/claude-bridge.json)
+// and the project config directory (.omp/), project overriding global. Missing or
 // unparseable files are ignored (error to console.error, empty object
 // returned) so the extension always starts.
 
@@ -19,7 +19,6 @@ export interface Config {
 		defaultMode?: "full" | "read" | "none";
 		defaultIsolated?: boolean;
 		allowFullMode?: boolean;
-		appendSkills?: boolean;
 	};
 	/** Low-level Claude Agent SDK plumbing. Most users won't need these. */
 	provider?: {

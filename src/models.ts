@@ -1,6 +1,6 @@
 // Model selection + display-order policy for the model picker. The picker is
-// driven by pi-ai's anthropic catalog: models appear (and disappear) with it,
-// no per-model code here. Extracted from index.ts so tests can import without
+// driven by the host's anthropic catalog (omp's pi-ai): models appear (and
+// disappear) with it, no per-model code here. Extracted from index.ts so tests can import without
 // activating the extension.
 // `resolveModel` resolves family shortcuts (opus/sonnet/fable) to the newest
 // matching id regardless of sort order; sort order only drives picker display.
@@ -44,15 +44,65 @@ export function buildModels<T extends { id: string; [key: string]: any }>(piAiMo
 			if (ra[1] !== rb[1]) return rb[1] - ra[1];
 			return a.id.localeCompare(b.id);
 		})
-		// Forward thinkingLevelMap so pi-ai's per-model overrides (e.g. opus-4-8
-		// mapping xhigh→xhigh and max→max) are visible to the effort lookup.
-		.map(({ id, name, reasoning, input, contextWindow, maxTokens, thinkingLevelMap }) => ({
+		// Forward the catalog's thinking metadata: omp's `thinking.efforts` is what its
+		// picker offers per model (Opus 5.5 up to max, Haiku 4.5 without xhigh) and what
+		// effortFor clamps to. Without it omp falls back to a generic minimal..high list.
+		// pi-ai's thinkingLevelMap is kept for hosts that ship it instead.
+		.map(({ id, name, reasoning, input, contextWindow, maxTokens, thinking, thinkingLevelMap }) => ({
 			id,
 			name,
 			reasoning, input, contextWindow, maxTokens,
-			thinkingLevelMap,
+			...(thinking ? { thinking } : {}),
+			...(thinkingLevelMap ? { thinkingLevelMap } : {}),
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		}));
+}
+
+// Claude Code's effort ladder, lowest first (the SDK's EffortLevel).
+const EFFORT_LADDER = ["low", "medium", "high", "xhigh", "max"] as const;
+export type ClaudeCodeEffort = (typeof EFFORT_LADDER)[number];
+
+// A host thinking level on a model without adaptive effort: the level is a budget
+// tier, so the top tier asks for Claude Code's top effort.
+const TIER_TO_EFFORT: Record<string, ClaudeCodeEffort> = {
+	minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "max", max: "max",
+};
+
+/**
+ * The Claude Code effort for a host reasoning level, or undefined to leave
+ * Claude Code at its default.
+ *
+ * omp's catalog says what its levels mean per model. On an `anthropic-adaptive`
+ * model `thinking.efforts` are Anthropic's own efforts (Opus 5.5: low..max,
+ * Sonnet 4.6: low..high), so the level passes through — `minimal`, which Claude
+ * Code lacks, as low — and one the model does not list steps down to the highest
+ * it does: asking for an effort the model lacks fails the turn, and omp only
+ * clamps what its own picker offers, not what AskClaude passes. Any other mode
+ * (`budget`, `anthropic-budget-effort`) lists budget tiers, minimal..xhigh, which
+ * map onto the ladder with the top tier as max. A pi-ai thinkingLevelMap, when a
+ * host ships one, wins outright (null there means "send no effort").
+ */
+export function effortFor(
+	model: {
+		thinking?: { mode?: string; efforts?: readonly string[] };
+		thinkingLevelMap?: Record<string, string | null>;
+	},
+	reasoning: string | undefined,
+): ClaudeCodeEffort | undefined {
+	if (!reasoning || reasoning === "off") return undefined;
+	const mapped = model.thinkingLevelMap?.[reasoning];
+	if (mapped === null) return undefined;
+	if (typeof mapped === "string" && (EFFORT_LADDER as readonly string[]).includes(mapped)) return mapped as ClaudeCodeEffort;
+	if (model.thinking?.mode !== "anthropic-adaptive") return TIER_TO_EFFORT[reasoning];
+	const requested = reasoning === "minimal" ? "low" : reasoning;
+	const rank = (EFFORT_LADDER as readonly string[]).indexOf(requested);
+	if (rank === -1) return undefined;
+	const supported = model.thinking.efforts;
+	if (!supported || supported.length === 0) return EFFORT_LADDER[rank];
+	for (let i = rank; i >= 0; i--) {
+		if (supported.includes(EFFORT_LADDER[i])) return EFFORT_LADDER[i];
+	}
+	return undefined;
 }
 
 export type LongContextSettings = {

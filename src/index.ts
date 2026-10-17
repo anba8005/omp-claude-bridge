@@ -1,32 +1,27 @@
 import { calculateCost, StringEnum, type AssistantMessage, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TextContent, type Tool, type UserMessage } from "@earendil-works/pi-ai";
 import * as piAi from "@earendil-works/pi-ai";
 import { getModels } from "@earendil-works/pi-ai/compat";
-import { buildSessionContext, compact, generateBranchSummary, keyHint, type BranchSummaryResult, type CompactionEntry, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import { query, type EffortLevel, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
+import { buildSessionContext, getAgentDir, keyHint, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { query, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import { createSession, deleteSession, openSession, repairToolPairing } from "cc-session-io";
 import { appendFileSync, mkdirSync, realpathSync, statSync } from "fs";
-import { homedir } from "os";
 import { dirname, join } from "path";
 import { PROVIDER_ID, messageContentToText, convertPiMessages } from "./convert.js";
-import { applyLongContext, buildModels, claudeCodeModelId, type LongContextSettings, resolveModel as _resolveModel } from "./models.js";
-import { MCP_SERVER_NAME, MCP_TOOL_PREFIX, renderSkillsBlock } from "./skills.js";
+import { applyLongContext, buildModels, claudeCodeModelId, effortFor, type LongContextSettings, resolveModel as _resolveModel } from "./models.js";
+import { MCP_SERVER_NAME, MCP_TOOL_PREFIX } from "./skills.js";
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
 import { QueryContext, ctx } from "./query-state.js";
 import { makePromptStream, userMessage, type PromptStream } from "./prompt-stream.js";
 import { claudeCodeSettings, loadConfig, markStartupNoticeShown, type Config } from "./config.js";
-import {
-	collectPromptSkills,
-	projectPromptCapture,
-	sharedPromptCaptures,
-} from "./prompt-capture.js";
+import { isOneOffRequest, projectOmpSystemPrompt, systemPromptText } from "./omp-prompt.js";
 import { collectCarriedAttachments, placeCarriedAttachments, type CarriedAttachment } from "./attachments.js";
 import { createToolServer } from "./mcp-server.js";
 import { buildActionSummary, type ToolCallState } from "./askclaude-ui.js";
-import { nonSystemMessages, toBridgeContext } from "./transcript.js";
+import { latestResetBoundaryId, toBridgeContext } from "./host-context.js";
 
 // Compat (#2): use factory if available (pi-ai ≥0.66), else fall back to constructor (gsd-pi etc.)
 const _piAi = piAi as any;
@@ -36,11 +31,12 @@ const newAssistantMessageEventStream: () => AssistantMessageEventStream =
 		: () => new _piAi.AssistantMessageEventStream();
 
 // --- Debug logging ---
-// CLAUDE_BRIDGE_DEBUG=1 enables debug logging to ~/.pi/agent/claude-bridge.log
+// CLAUDE_BRIDGE_DEBUG=1 enables debug logging to <agent dir>/claude-bridge.log
+// (~/.omp/agent under omp).
 
 const DEBUG = process.env.CLAUDE_BRIDGE_DEBUG === "1";
-const DEBUG_LOG_PATH = process.env.CLAUDE_BRIDGE_DEBUG_PATH || join(homedir(), ".pi", "agent", "claude-bridge.log");
-const DIAG_LOG_PATH = join(homedir(), ".pi", "agent", "claude-bridge-diag.log");
+const DEBUG_LOG_PATH = process.env.CLAUDE_BRIDGE_DEBUG_PATH || join(getAgentDir(), "claude-bridge.log");
+const DIAG_LOG_PATH = join(getAgentDir(), "claude-bridge-diag.log");
 
 // CLAUDE_BRIDGE_RECORD_STREAM=<path> appends every SDK message consumeQuery sees,
 // one JSON object per line. Used by tests/lib/record-sdk-streams.mjs to capture
@@ -453,10 +449,6 @@ async function runIsolatedSummary(
 	options: SimpleStreamOptions | undefined,
 	stream: AssistantMessageEventStream,
 ): Promise<void> {
-	// pi 0.86 delivers compaction/branch-summary requests as a transcript: the summarization
-	// prompt folded into a leading system message ahead of the lone user message (issue #106).
-	// Recover the 0.85 shape so the extraction assertion below holds and the summarization
-	// prompt still reaches CC as its systemPrompt.
 	context = toBridgeContext(context);
 	let sdkQuery: ReturnType<typeof query> | undefined;
 	let wasAborted = false;
@@ -467,21 +459,17 @@ async function runIsolatedSummary(
 	};
 
 	try {
-		// One-off summarizer calls (compaction, branch summary, turn prefix, bug report —
-		// anything routed through pi's completeSummarization) are marked cacheRetention:
-		// "none". Any of them may appear in a future pi release without a bridge change,
-		// so route on the marker, not on which summarizer is calling. Non-summarizer calls
-		// must still match the [system,user] compaction shape exactly.
-		const isOneOffSummary = options?.cacheRetention === "none";
-		const promptText = isOneOffSummary
-			? extractUserPrompt(context.messages)
-			: extractIsolatedSummaryPrompt(context.messages);
-		if (!promptText) throw new Error("runIsolatedSummary: one-off summary without a user prompt (last message is not user?)");
+		// Every caller routes here on the one-off shape (isOneOffRequest: one user message, no
+		// session prompt) or on cacheRetention "none", so the lone user message is the prompt.
+		const promptText = extractIsolatedSummaryPrompt(context.messages);
 		const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
 		const compactProviderSettings = loadConfig(cwd).provider;
 		const claudeExecutable = compactProviderSettings?.pathToClaudeCodeExecutable;
 		const cliModel = claudeCodeModelId(model, longContextSettings);
-		debug(`compact summary: spawn model=${cliModel} registeredModel=${model.id} promptLen=${promptText.length}`);
+		// The summarizer asks for its own reasoning level (omp's compaction threads the
+		// session's); without it Claude Code would summarize at its default effort.
+		const effort = effortFor(model, options?.reasoning);
+		debug(`compact summary: spawn model=${cliModel} registeredModel=${model.id} effort=${effort ?? "default"} promptLen=${promptText.length}`);
 
 		sdkQuery = query({
 			prompt: promptText,
@@ -494,9 +482,10 @@ async function runIsolatedSummary(
 				settingSources: [] as SettingSource[],
 				skills: [],
 				persistSession: false,
-				systemPrompt: context.systemPrompt,
+				systemPrompt: systemPromptText(context.systemPrompt as unknown as string | string[] | undefined),
 				model: cliModel,
 				maxTurns: 1,
+				...(effort ? { effort } : {}),
 				...(claudeExecutable ? { pathToClaudeCodeExecutable: claudeExecutable } : {}),
 				...makeCliDebugOptions("compact-summary"),
 			},
@@ -559,17 +548,6 @@ async function runIsolatedSummary(
 		options?.signal?.removeEventListener("abort", onAbort);
 		try { sdkQuery?.close(); } catch {}
 	}
-}
-
-function reinjectPriorCompactionFileOps(branchEntries: Array<{ type: string; details?: unknown }>, preparation: { fileOps: { read: Set<string>; edited: Set<string> } }): void {
-	const prior = [...branchEntries]
-		.reverse()
-		.find((entry): entry is CompactionEntry => entry.type === "compaction");
-	const details = prior?.details as { readFiles?: unknown; modifiedFiles?: unknown } | undefined;
-	if (!Array.isArray(details?.readFiles) || !Array.isArray(details?.modifiedFiles)) return;
-	for (const file of details.readFiles) preparation.fileOps.read.add(String(file));
-	for (const file of details.modifiedFiles) preparation.fileOps.edited.add(String(file));
-	debug(`compact takeover: re-injected prior file ops read=${details.readFiles.length} modified=${details.modifiedFiles.length}`);
 }
 
 interface SyncResult {
@@ -659,11 +637,9 @@ function syncSharedSession(
 	customToolNameToSdk?: Map<string, string>,
 	modelId?: string,
 ): SyncResult {
-	// System messages are pi 0.86's transcript representation of prompt and tool state, not
-	// conversation history — they are never imported into a CC session, so exclude them from
-	// the history space (priorMessages, cursor, missed) everywhere below (issue #106).
-	const history = nonSystemMessages(messages);
-	const priorMessages = history.slice(0, turnStart(history)); // everything before the current user turn
+	// Callers pass a context already through toBridgeContext, so omp's developer messages are
+	// user turns here and every count below matches the history Claude Code is given.
+	const priorMessages = messages.slice(0, turnStart(messages)); // everything before the current user turn
 
 	// REUSE path
 	//
@@ -697,8 +673,10 @@ function syncSharedSession(
 	// path: runIsolatedSummary never calls syncSharedSession at all.
 	//
 	// Only reachable when needsRebuild is false — user-facing history rewrites
-	// (/compact, session_tree, /new, fork) always set needsRebuild or clear
-	// sharedSession before the next syncSharedSession call.
+	// (/compact, session_tree, /clear, /new, /resume, /fork, /branch) always set
+	// needsRebuild or clear sharedSession before the next syncSharedSession call.
+	// /clear fires no event under omp; the before_agent_start reset_boundary check
+	// in the default export is what keeps it out of this branch.
 	if (sharedSession && !sharedSession.needsRebuild && priorMessages.length < sharedSession.cursor) {
 		debug(`Case 1 synthetic: clean start for shorter context, preserving shared session ${sharedSession.sessionId.slice(0, 8)}, cursor=${sharedSession.cursor}`);
 		debug(`syncResult: path=clean-start preserve-shared sessionId=${sharedSession.sessionId} cursor=${sharedSession.cursor}`);
@@ -707,7 +685,7 @@ function syncSharedSession(
 
 	// REBUILD path
 	if (priorMessages.length === 0) {
-		debug(`Case 1: clean start, ${history.length} total messages`);
+		debug(`Case 1: clean start, ${messages.length} total messages`);
 		debug(`syncResult: path=clean-start`);
 		return { sessionId: null };
 	}
@@ -773,10 +751,6 @@ export const __test = {
 	drainForAbort,
 	CC_CHILD_ENV,
 	buildMcpServers,
-	branchSummaryOutcome,
-	get promptCaptures() {
-		return promptCaptures;
-	},
 };
 
 // --- Provider helpers: tool name mapping ---
@@ -856,26 +830,10 @@ function showStartupNoticeOnce(): void {
 	const path = markStartupNoticeShown();
 	// pi wraps the whole notify string in the theme's dim foreground; the inner reset
 	// drops back to the terminal default rather than dim, which is fine here.
-	const title = `\x1b[33mWelcome to pi-claude-bridge\x1b[39m — settings live in ${path}`;
+	const title = `\x1b[33mWelcome to omp-claude-bridge\x1b[39m — settings live in ${path}`;
 	const bullets = [...notices, "This message only appears once. See README.md for more."].map((n) => `• ${n}`);
 	piUI?.notify([title, ...bullets, "─".repeat(64)].join("\n"), "info");
 }
-
-// Captures of what pi assembled per agent; see src/prompt-capture.ts for why this
-// is keyed rather than held in a single slot. One process-wide instance, shared
-// across every extension module instance: isolated subagents re-evaluate this
-// module, and the pinned stream they all route through resolves against it.
-const promptCaptures = sharedPromptCaptures((diagnostic) => {
-	const first = diagnostic.matches[0];
-	debug(
-		`prompt-capture: no match for ${diagnostic.systemPrompt.length}-char system prompt. `
-		+ (first
-			? `closest known (${first.key.length}-char) shares its first ${first.firstDivergent} chars and diverges at offset ${first.firstDivergent}: `
-			  + JSON.stringify(diagnostic.systemPrompt.slice(first.firstDivergent - 40, first.firstDivergent + 60))
-			: "no known captures to compare against."
-		) + ` known keys=${diagnostic.matches.length}`,
-	);
-});
 
 /** Whatever a settled session left behind, named in one greppable line.
  *
@@ -894,25 +852,6 @@ function reportLeaks(label: string): void {
 		`WARNING: ${label} left state behind — contexts=${activeQueryContexts.size} `
 		+ `pendingToolCalls=${pendingCalls} promptStreams=${liveStreams}`,
 	);
-}
-
-/** What pi's branch summary means for the navigation it was asked for.
- *
- *  Cancelling on failure matches pi's own path, which rethrows a summary error out
- *  of the navigation rather than moving without one. Separated from the event
- *  handler so this decision is testable without a Claude Code subprocess — driving
- *  `generateBranchSummary` itself would only be testing pi. */
-function branchSummaryOutcome(result: BranchSummaryResult): { cancel: true } | { summary: { summary: string; details: unknown; usage?: BranchSummaryResult["usage"] } } {
-	if (result.aborted) return { cancel: true };
-	if (result.error) throw new Error(result.error);
-	debug(`session_before_tree: takeover complete summaryLen=${result.summary?.length ?? 0}`);
-	return {
-		summary: {
-			summary: result.summary ?? "",
-			details: { readFiles: result.readFiles ?? [], modifiedFiles: result.modifiedFiles ?? [] },
-			usage: result.usage,
-		},
-	};
 }
 
 function contextForToolResults(results: McpResult[]): QueryContext | undefined {
@@ -1015,13 +954,6 @@ function logServedContextWindow(label: string, message: SDKMessage, model: Model
 		debug(`${label}: served contextWindow=${v.contextWindow ?? "?"} maxOutputTokens=${v.maxOutputTokens ?? "?"} servedModel=${k} registered=${model.contextWindow}`);
 	}
 }
-
-// --- Effort level mapping ---
-// Pi reasoning levels → CC SDK effort levels
-
-const REASONING_TO_EFFORT: Record<string, EffortLevel> = {
-	minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "max",
-};
 
 // --- Provider helpers: misc ---
 
@@ -1492,19 +1424,17 @@ function drainForAbort(c: QueryContext, promptStream: PromptStream): void {
  *  Two cases: tool result delivery (active query) or fresh query. */
 function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
 	showStartupNoticeOnce();
-	// pi 0.86 hands providers a transcript (prompt/tools folded into system messages) —
-	// translate to the 0.85-shaped Context every cursor write, syncSharedSession call and
-	// prompt-capture lookup below assumes (issue #106). A 0.85 host passes through unchanged.
+	// omp's developer messages become user turns before anything counts messages — every
+	// cursor write and syncSharedSession call below assumes that shape.
 	context = toBridgeContext(context);
 
-	// One-off summarizer calls arrive HERE too, not only via isolatedStreamFn: /bug report
-	// (summarizeForBugReport) routes through agent.streamFunction -> streamSimple, with no
-	// takeover hook. pi marks every one-off summarizer with cacheRetention:"none" in
-	// completeSummarization, so route on the marker: their prompt is never recorded by the
-	// capture boundaries and resolveOrDerive would throw. Hand them to the isolated path
-	// (separate persistSession:false CC process, no session sync needed).
-	if (options?.cacheRetention === "none") {
-		debug(`provider: one-off summarizer call (cacheRetention none) routed to isolated summary, msgs=${context.messages.length}`);
+	// omp's summarizers (compaction, turn prefix, handoff, branch summary) call the
+	// registered provider directly. Hand them to the isolated path — a separate
+	// persistSession:false CC process with no session sync — so a summary never replaces
+	// the conversation it summarizes. Routed on shape, not on a marker: omp's
+	// cacheRetention is a user setting, so "none" can be every call.
+	if (isOneOffRequest(context as unknown as Parameters<typeof isOneOffRequest>[0])) {
+		debug(`provider: one-off summary request routed to isolated summary, msgs=${context.messages.length} prompt=${JSON.stringify((systemPromptText(context.systemPrompt) ?? "").slice(0, 120))}`);
 		return isolatedStreamFn(model, context, options);
 	}
 
@@ -1575,23 +1505,14 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const queryCtx = isReentrant ? new QueryContext() : ctx();
 	debug(`provider: fresh query setup, isReentrant=${isReentrant}, activeContexts=${activeQueryContexts.size}`);
 
-	// Resolved first: an unaccountable system prompt throws, and doing that before
-	// anything is claimed or reset leaves no half-built query behind — in particular
-	// no stream claimed on the shared context that nobody will ever end.
 	const { mcpTools, customToolNameToSdk, customToolNameToPi } = resolveMcpTools(context, askClaudeToolName);
-	// Build from what Pi loaded for this run, so `--no-context-files` and
-	// `--no-skills` reach Claude Code by leaving nothing to forward. A sub-agent's
-	// custom override embeds its parent's assembled Pi prompt; recursive projection
-	// replaces that exact inherited prompt with its already-safe portable parts.
-	// Derive the key from the transcript replay (toBridgeContext), NOT from the
-	// recorded keys: under a forced prompt the transcript head is projected via
-	// transformContext after turn_start, so ctx.getSystemPrompt() is not the head.
-	const promptCapture = promptCaptures.resolveOrDerive(context.systemPrompt);
-	const systemPromptAppend = promptCapture
-		? projectPromptCapture(promptCapture, {
-			skillReadTool: mcpTools.some((tool) => tool.name === "read") ? "mcp" : "none",
-		})
-		: undefined;
+	// Projected from the blocks omp built for this very call, so `--no-skills`, a
+	// subagent's own prompt and an extension's added block all reach Claude Code as
+	// they reached the turn. omp's harness itself stays behind (see omp-prompt.ts).
+	const systemPromptBlocks = context.systemPrompt as unknown as string | string[] | undefined;
+	const systemPromptAppend = projectOmpSystemPrompt(systemPromptBlocks, {
+		skillReadTool: mcpTools.some((tool) => tool.name === "read") ? "mcp" : "none",
+	});
 
 	// 2. Fresh child context — constructor already gave us clean Maps and empty
 	//    arrays. For a reused top-level context, clear explicitly.
@@ -1649,13 +1570,8 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const strictMcpConfigEnabled = providerSettings.strictMcpConfig !== false;
 	const claudeExecutable = providerSettings.pathToClaudeCodeExecutable;
 
-	// Prefer the model's own thinkingLevelMap when present (pi-ai 0.72+ ships
-	// per-model overrides — e.g. opus-4-7 wants xhigh→xhigh, not xhigh→max).
-	// Fall back to our generic table for older pi-ai or unmapped levels.
-	const effort = options?.reasoning
-		? ((model as any).thinkingLevelMap?.[options.reasoning] as EffortLevel | undefined)
-			?? REASONING_TO_EFFORT[options.reasoning]
-		: undefined;
+	// Clamped to the efforts omp's catalog lists for this model (see effortFor).
+	const effort = effortFor(model, options?.reasoning);
 
 	const extraArgs: Record<string, string | null> = { model: cliModel };
 	if (strictMcpConfigEnabled) extraArgs["strict-mcp-config"] = null;
@@ -1709,7 +1625,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	debug("provider: fresh query",
 		`model=${cliModel} msgs=${context.messages.length} tools=${mcpTools.length}`,
 		`resume=${resumeSessionId?.slice(0, 8) ?? "none"} effort=${effort ?? "default"}`,
-		`ctxFiles=${promptCapture?.contextFiles.length ?? 0} strictMcp=${strictMcpConfigEnabled}`,
+		`promptBlocks=${Array.isArray(systemPromptBlocks) ? systemPromptBlocks.length : systemPromptBlocks ? 1 : 0} append=${systemPromptAppend?.length ?? 0} strictMcp=${strictMcpConfigEnabled}`,
 		`prompt=${promptText.slice(0, 60)}${promptBlocks ? " [+images]" : ""}`);
 
 	// 3. Start SDK query and claim it for this context
@@ -1835,8 +1751,6 @@ async function promptAndWait(
 	toolCalls: Map<string, ToolCallState>,
 	signal?: AbortSignal,
 	options?: {
-		systemPrompt?: string;
-		appendSkills?: boolean;
 		onStreamUpdate?: (responseText: string) => void;
 		model?: string;
 		thinking?: string;
@@ -1871,24 +1785,12 @@ async function promptAndWait(
 	// Mode → disallowed tools
 	const disallowedTools = MODE_DISALLOWED_TOOLS[mode] ?? [];
 
-	// AskClaude uses Claude Code's native Read tool rather than Pi's MCP bridge.
-	// Same resolver as the provider path: a prompt neither recorded nor derivable
-	// throws here too, rather than silently sending Claude Code no skills.
-	//
-	// Resolved only when the answer would be used. The throw is justified by what a
-	// miss would cost, so where it costs nothing — skills switched off, or no reader
-	// to open a skill file with — an unrelated miss must not fail the call.
-	const skillReadTool = disallowedTools.includes("Read") ? "none" : "native";
-	const skillCapture = options?.appendSkills !== false && skillReadTool !== "none"
-		? promptCaptures.resolveOrDerive(options?.systemPrompt)
-		: undefined;
-	const skillsBlock = skillCapture
-		? renderSkillsBlock(collectPromptSkills(skillCapture), skillReadTool)
-		: undefined;
+	// No omp skills here: omp addresses them as `skill://<name>`, which only omp's own
+	// read tool resolves, and AskClaude runs on Claude Code's native Read.
 
 	// Effort
 	const effort = options?.thinking && options.thinking !== "off"
-		? REASONING_TO_EFFORT[options.thinking] : undefined;
+		? effortFor(model ?? {}, options.thinking) : undefined;
 
 	const claudeExecutable = providerSettings.pathToClaudeCodeExecutable;
 
@@ -1901,13 +1803,12 @@ async function promptAndWait(
 	debug("askClaude:",
 		`mode=${mode} model=${modelId} cliModel=${cliModel} effort=${effort ?? "default"}`,
 		`isolated=${options?.isolated ?? false} resume=${resumeSessionId?.slice(0, 8) ?? "none"}`,
-		`skills=${Boolean(skillsBlock)} promptLen=${prompt.length}`);
+		`promptLen=${prompt.length}`);
 
 	// skills: [] suppresses Claude Code's own skill listing, a system-reminder naming every
 	// skill under the ~/.claude estate. The provider path gets this for free — `tools: []`
 	// removes the Skill tool and the listing with it — but AskClaude runs on CC's native
-	// tools, so it has to be asked for. Pi-side skills still arrive via skillsBlock below,
-	// which is meant to be the only channel.
+	// tools, so it has to be asked for.
 	const sdkQuery = query({
 		prompt,
 		options: {
@@ -1920,8 +1821,7 @@ async function promptAndWait(
 			...(effort ? { effort } : {}),
 			// Preset unconditionally: omitting it leaves the child on the SDK's bare default,
 			// without the tool and permission guidance the bridge relies on everywhere else.
-			// Whether pi has skills to append is unrelated to whether the child needs that.
-			systemPrompt: { type: "preset", preset: "claude_code", append: skillsBlock },
+			systemPrompt: { type: "preset", preset: "claude_code" },
 			settingSources: ["user", "project"] as SettingSource[],
 			extraArgs,
 			...(resumeSessionId ? { resume: resumeSessionId } : {}),
@@ -2019,6 +1919,9 @@ async function promptAndWait(
 const DEFAULT_TOOL_DESCRIPTION_FULL = "Delegate to Claude Code for a second opinion or analysis (code review, architecture questions, debugging theories), or to autonomously handle a task. Defaults to read-only mode — use full mode when the user wants to delegate a task that requires changes. Prefer to handle straightforward tasks yourself.";
 const DEFAULT_TOOL_DESCRIPTION = "Delegate to Claude Code for a second opinion or analysis (code review, architecture questions, debugging theories). Read-only — Claude Code can explore the codebase but not make changes. Prefer to handle straightforward tasks yourself.";
 
+// The slice of the host's TUI theme the AskClaude renderers use.
+type Theme = { fg(color: any, text: string): string; bold(text: string): string };
+
 const PREVIEW_MAX_CHARS = 1000;
 const PREVIEW_MAX_LINES = 6;
 
@@ -2044,7 +1947,7 @@ export default function (pi: ExtensionAPI) {
 	};
 	const registeredModels = applyLongContext(MODELS, longContextSettings);
 	if (registeredModels.length === 0) {
-		console.error("claude-bridge: no models available from pi-ai's anthropic catalog — update @earendil-works/pi-ai (requires >=0.85.0)");
+		console.error("claude-bridge: no models available from the host's anthropic catalog — update omp");
 	}
 
 	if (!config.startupNoticeShown) {
@@ -2052,7 +1955,11 @@ export default function (pi: ExtensionAPI) {
 		if (config.askClaude?.enabled === undefined) pendingNotices.push("The AskClaude tool is opt-in only. Set askClaude.enabled to use it.");
 	}
 
-	// Reset shared session on pi session lifecycle events
+	// Newest `reset_boundary` id the before_agent_start check below has seen; undefined
+	// until it has looked once.
+	let seenResetBoundaryId: string | null | undefined;
+
+	// Reset shared session on session lifecycle events
 	const clearSession = (event: string) => {
 		debug(`${event}: clearing session ${sharedSession?.sessionId?.slice(0, 8) ?? "none"}`);
 		sharedSession = null;
@@ -2066,106 +1973,31 @@ export default function (pi: ExtensionAPI) {
 			g[ACTIVE_STREAM_SIMPLE_KEY] = undefined;
 		}
 	};
+	// A different conversation in the same runner. omp keeps its extension runner across
+	// /new, /resume, /fork and /branch, so session_start does not fire again; the switch and
+	// branch events do. Only the Claude Code session goes — the provider registration
+	// belongs to the runner, which is still alive.
+	const forgetSession = (event: string) => {
+		debug(`${event}: forgetting session ${sharedSession?.sessionId?.slice(0, 8) ?? "none"}`);
+		sharedSession = null;
+		// The next branch is another session's: its markers are a baseline, not a /clear.
+		seenResetBoundaryId = undefined;
+	};
 	pi.on("session_start", (event, ctx) => {
 		piUI = ctx.ui;
 		piMode = ctx.mode;
-		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
-			clearSession(`session_start:${event.reason}`);
+		// pi re-emits session_start with a reason on /new, /resume and /fork; omp emits it
+		// once per runner, without one.
+		const reason = (event as { reason?: string } | undefined)?.reason;
+		if (reason === "new" || reason === "resume" || reason === "fork") {
+			clearSession(`session_start:${reason}`);
 		}
 	});
-	// `--system-prompt` replaces pi's default rather than adding to it, but Claude
-	// Code's preset carries its own tool and permission guidance that the bridge
-	// still depends on, so both flags are forwarded as an append.
-	//
-	// The options (custom/append/contextFiles/skills) are pi config, stable across a
-	// turn; only the auto-generated tool list in the rendered prompt varies. Stash them
-	// at before_agent_start so the agent_start recording below can reuse them.
-	type RecordOptions = Parameters<typeof recordSystemPrompt>[2];
-	let lastSystemPromptOptions: RecordOptions | undefined;
-	function recordSystemPrompt(source: string, systemPrompt: string | undefined, options: {
-		customPrompt?: string;
-		appendSystemPrompt?: string;
-		contextFiles?: { path: string; content: string }[];
-		skills?: Parameters<typeof promptCaptures.record>[1]["skills"];
-		selectedTools?: string[];
-	} | undefined) {
-		if (!systemPrompt) return;
-		const hasRead = !options?.selectedTools || options.selectedTools.includes("read");
-		promptCaptures.record(systemPrompt, {
-			custom: options?.customPrompt,
-			append: options?.appendSystemPrompt,
-			contextFiles: options?.contextFiles ?? [],
-			skills: hasRead ? options?.skills ?? [] : [],
-		}, source);
-	}
-	pi.on("before_agent_start", (event) => {
-		lastSystemPromptOptions = event.systemPromptOptions;
-		recordSystemPrompt("before_agent_start", event.systemPrompt, event.systemPromptOptions);
-	});
-	// The prompt the provider actually queries with is the fully-widened one: MCP tool
-	// descriptions merge into the system prompt only after their servers connect, which
-	// is after before_agent_start. ctx.getSystemPrompt() returns that widened prompt by
-	// agent_start (verified: before_agent_start=10,988 chars vs agent_start/query=23,479).
-	// A subagent embeds the widened parent prompt verbatim (pi-subagents reads
-	// ctx.getSystemPrompt() at dispatch), so unless the widened prompt is a capture key
-	// too, the child's turn resolves against nothing, falls to a verbatim side request,
-	// and ships pi's harness — tripping the server's third-party plan-eligibility check
-	// ("out of extra usage"). Recording it here, before the query, restores the match.
-	//
-	// The widening needs pi's section-based prompt (post-0.85.1); on 0.85.1 the prompt is
-	// a fixed string and this record is a redundant-but-harmless second key that still
-	// catches a later handler rewriting the prompt (it also captures a handler-returned
-	// forceSystemPrompt, which buildSystemPrompt renders verbatim).
-	pi.on("agent_start", (_event, ctx) => {
-		recordSystemPrompt("agent_start", ctx.getSystemPrompt(), lastSystemPromptOptions);
-	});
-
-	// Mid-run re-renders: turn_start fires before every turn (first turn included, both
-	// architectures) after the turn's prompt is final: prepareNextTurnWithContext has
-	// re-rendered the options (pi's section-based prompt) and any mid-run
-	// setActiveToolsByName rebuild (0.85.1) already landed. Re-keying at each boundary
-	// the prompt can change at keeps exact-match alive mid-run. The stashed options can
-	// lag a mid-run tool-loadout change, which skews the hasRead skills filter until the
-	// next before_agent_start — accepted: a stale skills list beats failing the turn.
-	pi.on("turn_start", (_event, ctx) => {
-		recordSystemPrompt("turn_start", ctx.getSystemPrompt(), lastSystemPromptOptions);
-	});
+	pi.on("session_switch" as any, (event: { reason?: string }) => forgetSession(`session_switch:${event?.reason ?? "?"}`));
+	pi.on("session_branch" as any, (event: { reason?: string }) => forgetSession(`session_branch:${event?.reason ?? "?"}`));
 	pi.on("session_shutdown", () => {
 		reportLeaks("session_shutdown");
 		clearSession("session_shutdown");
-	});
-
-	pi.on("session_before_compact", async (event, ctx) => {
-		if (ctx.model?.baseUrl !== "claude-bridge") return undefined;
-		debug(
-			`session_before_compact: takeover reason=${event.reason} willRetry=${event.willRetry} ` +
-			`isSplitTurn=${event.preparation.isSplitTurn} messages=${event.preparation.messagesToSummarize.length} ` +
-			`turnPrefix=${event.preparation.turnPrefixMessages.length}`,
-		);
-		try {
-			reinjectPriorCompactionFileOps(event.branchEntries, event.preparation);
-			const compaction = await compact(
-				event.preparation,
-				ctx.model,
-				undefined,
-				undefined,
-				event.customInstructions,
-				event.signal,
-				undefined,
-				isolatedStreamFn,
-				undefined,
-			);
-			debug(`session_before_compact: takeover complete summaryLen=${compaction.summary.length}`);
-			return { compaction };
-		} catch (err) {
-			const msg = errorMessage(err);
-			debug("session_before_compact: takeover failed; cancelling to avoid native compact fallback", err);
-			ctx.ui?.notify?.(
-				`Claude bridge compact failed (${msg}); cancelled to avoid known hang. Retry, switch model, or reduce context.`,
-				"error",
-			);
-			return { cancel: true };
-		}
 	});
 
 	// pi /compact and session-tree navigation (rewind / fork-at-point /
@@ -2181,39 +2013,30 @@ export default function (pi: ExtensionAPI) {
 			sharedSession = { ...sharedSession, needsRebuild: true };
 		}
 	};
-	pi.on("session_compact", (event) => markRebuild(`session_compact:${event.reason}:willRetry=${event.willRetry}`));
+	pi.on("session_compact", (event) => {
+		const fromExtension = (event as { fromExtension?: boolean }).fromExtension;
+		markRebuild(`session_compact:fromExtension=${fromExtension ?? "?"}`);
+	});
 	pi.on("session_tree", () => markRebuild("session_tree"));
 
-	// Branch summarization — rewind or fork-at-point with "summarize" — is the other
-	// place pi asks the model for a summary, and unlike compaction it runs through
-	// the *agent's* stream function (agent-session passes `streamFn:
-	// this.agent.streamFunction`). On a bridge model that reaches this provider
-	// carrying pi's internal summarization prompt, which no `before_agent_start`
-	// ever recorded, so the prompt-capture resolver has nothing to resolve it to.
-	// Take it over the way compaction is taken over: the summary runs as its own
-	// Claude Code subprocess, never touching the live session or the resolver.
-	pi.on("session_before_tree", async (event, ctx) => {
-		if (ctx.model?.baseUrl !== "claude-bridge") return undefined;
-		const { entriesToSummarize, userWantsSummary, customInstructions, replaceInstructions } = event.preparation;
-		if (!userWantsSummary || entriesToSummarize.length === 0) return undefined;
-		debug(`session_before_tree: takeover entries=${entriesToSummarize.length} target=${event.preparation.targetId.slice(0, 8)}`);
+	// omp's /clear keeps the session and appends a `reset_boundary` entry; no event fires.
+	// The context the next turn sends then starts after the marker — shorter than the
+	// cursor — and syncSharedSession would read that as a reentrant subagent: run the turn
+	// with no history, every turn, until the conversation outgrew the old cursor. Checking
+	// the branch before each agent run turns a new marker into the rebuild a history
+	// rewrite needs. The first look only records the marker: a clear from before this
+	// runner loaded is already reflected in the session it starts from.
+	pi.on("before_agent_start", (_event, ctx) => {
+		let branch: readonly { type?: string; id?: string }[];
 		try {
-			const result = await generateBranchSummary(entriesToSummarize, {
-				model: ctx.model,
-				signal: event.signal,
-				customInstructions,
-				replaceInstructions,
-				streamFn: isolatedStreamFn,
-			});
-			return branchSummaryOutcome(result);
-		} catch (err) {
-			debug("session_before_tree: takeover failed; cancelling navigation", err);
-			ctx.ui?.notify?.(
-				`Claude bridge branch summary failed (${errorMessage(err)}); navigation cancelled.`,
-				"error",
-			);
-			return { cancel: true };
+			branch = ctx.sessionManager.getBranch() as unknown as readonly { type?: string; id?: string }[];
+		} catch {
+			return;
 		}
+		const latest = latestResetBoundaryId(branch);
+		const changed = seenResetBoundaryId !== undefined && latest !== null && latest !== seenResetBoundaryId;
+		seenResetBoundaryId = latest;
+		if (changed) markRebuild(`reset_boundary:${latest}`);
 	});
 
 	// --- Provider ---
@@ -2293,7 +2116,10 @@ export default function (pi: ExtensionAPI) {
 			label: askConf?.label ?? "Ask Claude Code",
 			description: askConf?.description ?? (allowFull ? DEFAULT_TOOL_DESCRIPTION_FULL : DEFAULT_TOOL_DESCRIPTION),
 			parameters: askClaudeParams,
-			renderCall(args, theme) {
+			// omp renders a call as (args, options, theme); pi as (args, theme). Take the theme
+			// from whichever position carries one.
+			renderCall(args, ...rest: unknown[]) {
+				const theme = rest.find((r): r is Theme => typeof (r as Theme | undefined)?.fg === "function")!;
 				let text = theme.fg("mdLink", theme.bold("AskClaude "));
 				const mode = args.mode ?? defaultMode;
 				const tags: string[] = [];
@@ -2340,7 +2166,7 @@ export default function (pi: ExtensionAPI) {
 			},
 			async execute(_id, params, signal, onUpdate, ctx) {
 				// Guard: circular delegation
-				if (ctx.model?.baseUrl === "claude-bridge") {
+				if (ctx.model?.provider === PROVIDER_ID || ctx.model?.baseUrl === "claude-bridge") {
 					debug("askClaude: blocked circular delegation (active provider is claude-bridge)");
 					return {
 						content: [{ type: "text" as const, text: "Error: AskClaude cannot be used when the active provider is claude-bridge — you're already running through Claude Code." }],
@@ -2365,8 +2191,6 @@ export default function (pi: ExtensionAPI) {
 
 				try {
 					const result = await promptAndWait(params.prompt, mode, toolCalls, signal, {
-						systemPrompt: ctx.getSystemPrompt(),
-						appendSkills: askConf?.appendSkills,
 						model: params.model,
 						thinking: params.thinking,
 						isolated,

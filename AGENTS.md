@@ -50,7 +50,7 @@ Maintain an entry in the `## UNRELEASED` section at the top of `CHANGELOG.md` fo
 - **Tag: summary** — detail
 ```
 
-Do not add changelog entries for docs-only changes. If multiple entries in the UNRELEASED section pertain to the same feature, try to combine them into one entry,
+An entry that carries an upstream change cites it: the upstream commit (short sha), PR (`elidickinson/pi-claude-bridge#N`) or tag. Do not add changelog entries for docs-only changes. If multiple entries in the UNRELEASED section pertain to the same feature, try to combine them into one entry,
 
 Tags: `Add`, `Fix`, `Refactor`, `Tests`, `Bump`, `Deprecate`, `Remove`.
 

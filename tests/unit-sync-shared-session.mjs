@@ -17,19 +17,22 @@ describe("syncSharedSession", () => {
 		__test.setPiUI(null);
 	});
 
-	// Fresh-session transcript from pi 0.86: the system prompt arrives as a leading system
-	// message (issue #106). It is prompt state, not history — a fresh session must still take
-	// the clean-start path (empty priors) rather than rebuild a session file holding nothing
-	// but a system head, which made --resume fail with "No conversation found".
-	it("takes the clean-start path when a transcript system message precedes the first user message", () => {
+	// omp opens a fresh session with developer reminders (date, cwd) ahead of the first user
+	// message. They are user turns on the wire — omp's own Anthropic provider sends them as
+	// such — so they belong to the prompt, not to history: a fresh session must still take
+	// the clean-start path rather than rebuild a session file holding only a reminder.
+	it("takes the clean-start path when a developer reminder precedes the first user message", () => {
 		const cwd = mkdtempSync(join(tmpdir(), "sync-shared-session-"));
 		try {
-			const result = __test.syncSharedSession([
-				{ role: "system", content: "You are Claude Code.", timestamp: Date.now() },
-				{ role: "user", content: "Hello", timestamp: Date.now() },
-			], cwd);
+			const context = __test.toBridgeContext({
+				messages: [
+					{ role: "developer", content: "Current date: 2026-10-17", timestamp: Date.now() },
+					{ role: "user", content: "Hello", timestamp: Date.now() },
+				],
+			});
+			const result = __test.syncSharedSession(context.messages, cwd);
 
-			assert.equal(result.sessionId, null, "a fresh session with only prompt state as priors is a clean start");
+			assert.equal(result.sessionId, null, "a reminder ahead of the first prompt is part of the prompt, not prior history");
 			assert.equal(result.preserveSharedSession, undefined);
 			assert.equal(__test.getSharedSession(), null, "a clean start must not create a session state");
 		} finally {
@@ -37,10 +40,10 @@ describe("syncSharedSession", () => {
 		}
 	});
 
-	// Mid-conversation tool-loadout updates (pi 0.86) also land in the transcript as system
-	// messages. They must not inflate the cursor or be imported as history, or the next turn's
-	// reuse check (priors >= cursor) fails and every turn rebuilds the session.
-	it("keeps cursor arithmetic consistent when system messages punctuate the history", () => {
+	// An empty developer message (omp sends ones that carry only provider controls) is skipped
+	// on the wire. It must not count toward the cursor either, or the next turn's reuse check
+	// (priors >= cursor) sees a message Claude Code never got and rebuilds every turn.
+	it("keeps cursor arithmetic consistent when empty developer messages punctuate the history", () => {
 		const cwd = mkdtempSync(join(tmpdir(), "sync-shared-session-"));
 		const sessionId = randomUUID();
 		try {
@@ -52,20 +55,23 @@ describe("syncSharedSession", () => {
 			seeded.save();
 			__test.setSharedSession({ sessionId, cursor: 2, cwd });
 
-			const result = __test.syncSharedSession([
-				{ role: "user", content: "Hi", timestamp: Date.now() },
-				{ role: "assistant", content: [{ type: "text", text: "Hello." }], timestamp: Date.now() },
-				{ role: "system", content: "", toolsAdded: [{ name: "grep", description: "", parameters: {} }], timestamp: Date.now() },
-				{ role: "user", content: "Next", timestamp: Date.now() },
-			], cwd);
+			const context = __test.toBridgeContext({
+				messages: [
+					{ role: "user", content: "Hi", timestamp: Date.now() },
+					{ role: "assistant", content: [{ type: "text", text: "Hello." }], timestamp: Date.now() },
+					{ role: "developer", content: "", timestamp: Date.now() },
+					{ role: "user", content: "Next", timestamp: Date.now() },
+				],
+			});
+			const result = __test.syncSharedSession(context.messages, cwd);
 
 			assert.equal(result.sessionId, sessionId, "2 priors at cursor 2 must resume, not rebuild");
-			assert.equal(__test.getSharedSession()?.cursor, 2, "cursor counts non-system messages only");
+			assert.equal(__test.getSharedSession()?.cursor, 2, "an empty developer message is not history");
 			const session = openSession({ sessionId, projectPath: cwd });
 			assert.deepEqual(
 				session.messages.map((m) => m.type),
 				["user", "assistant"],
-				"the resumed session file must hold the non-system history",
+				"the resumed session file must hold the conversation history",
 			);
 		} finally {
 			deleteSession(sessionId, cwd);

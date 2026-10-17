@@ -7,7 +7,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { applyLongContext, buildModels, claudeCodeModelId, resolveClaudeCodeRuntimeModel, resolveModel } from "../src/models.js";
+import { applyLongContext, buildModels, claudeCodeModelId, effortFor, resolveClaudeCodeRuntimeModel, resolveModel } from "../src/models.js";
 import { getModels } from "@earendil-works/pi-ai/compat";
 
 const PRO = { plan: "pro", longContextExtraUsage: false };
@@ -74,6 +74,56 @@ describe("MODELS projection", () => {
 	it("forwards undefined thinkingLevelMap unchanged (no fabricated defaults)", () => {
 		const models = buildModels([mockPiAiModel("claude-haiku-4-5")]);
 		assert.equal(find(models, "claude-haiku-4-5")?.thinkingLevelMap, undefined);
+	});
+
+	// omp's catalog describes efforts as `thinking`, which its picker reads per model.
+	// Without it omp offers a generic minimal..high list for every bridge model.
+	it("forwards omp's thinking metadata verbatim", () => {
+		const thinking = { mode: "anthropic-adaptive", efforts: ["low", "medium", "high", "xhigh", "max"] };
+		const models = buildModels([mockPiAiModel("claude-opus-5-5", { thinking })]);
+		assert.deepEqual(find(models, "claude-opus-5-5")?.thinking, thinking);
+	});
+});
+
+describe("effortFor", () => {
+	// Shapes from omp 18.8.9's anthropic catalog.
+	const opus55 = { thinking: { mode: "anthropic-adaptive", efforts: ["low", "medium", "high", "xhigh", "max"] } };
+	const sonnet46 = { thinking: { mode: "anthropic-adaptive", efforts: ["low", "medium", "high"] } };
+	const haiku45 = { thinking: { mode: "budget", efforts: ["minimal", "low", "medium", "high", "xhigh"] } };
+
+	it("passes an adaptive model's efforts straight through", () => {
+		for (const level of ["low", "medium", "high", "xhigh", "max"]) assert.equal(effortFor(opus55, level), level);
+	});
+
+	it("sends minimal as low: Claude Code has no minimal", () => {
+		assert.equal(effortFor(opus55, "minimal"), "low");
+		assert.equal(effortFor(haiku45, "minimal"), "low");
+	});
+
+	it("steps a level an adaptive model lacks down to the highest it lists", () => {
+		assert.equal(effortFor(sonnet46, "max"), "high");
+		assert.equal(effortFor(sonnet46, "xhigh"), "high");
+	});
+
+	it("reads a budget model's levels as tiers, the top one asking for max", () => {
+		assert.equal(effortFor(haiku45, "high"), "high");
+		assert.equal(effortFor(haiku45, "xhigh"), "max");
+	});
+
+	it("leaves Claude Code at its default when no level is asked for", () => {
+		assert.equal(effortFor(opus55, undefined), undefined);
+		assert.equal(effortFor(opus55, "off"), undefined);
+		assert.equal(effortFor(opus55, "bogus"), undefined);
+		assert.equal(effortFor({}, "bogus"), undefined);
+	});
+
+	it("uses the tier table for a model the catalog says nothing about", () => {
+		assert.equal(effortFor({}, "xhigh"), "max");
+	});
+
+	it("lets a pi-ai thinkingLevelMap decide, null meaning no effort", () => {
+		assert.equal(effortFor({ thinkingLevelMap: { xhigh: "xhigh" } }, "xhigh"), "xhigh");
+		assert.equal(effortFor({ thinkingLevelMap: { minimal: null } }, "minimal"), undefined);
 	});
 });
 
