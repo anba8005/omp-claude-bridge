@@ -1,9 +1,8 @@
-import { calculateCost, StringEnum, type AssistantMessage, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TextContent, type Tool, type UserMessage } from "@earendil-works/pi-ai";
+import { calculateCost, type AssistantMessage, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TextContent, type Tool, type UserMessage } from "@earendil-works/pi-ai";
 import * as piAi from "@earendil-works/pi-ai";
 import { buildSessionContext, getAgentDir, keyHint, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { query, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
-import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import { createSession, deleteSession, openSession, repairToolPairing } from "cc-session-io";
 import { appendFileSync, mkdirSync, realpathSync, statSync } from "fs";
@@ -21,6 +20,7 @@ import { collectCarriedAttachments, placeCarriedAttachments, type CarriedAttachm
 import { createToolServer } from "./mcp-server.js";
 import { buildActionSummary, type ToolCallState } from "./askclaude-ui.js";
 import { conversationOrigin, latestResetBoundaryId, toBridgeContext } from "./host-context.js";
+import { askClaudeCallTags, askClaudeToolDescription, buildAskClaudeParams, resolveAskClaudeDefaults, resolveAskClaudeMode, type AskClaudeMode } from "./askclaude-schema.js";
 
 // Compat (#2): use factory if available (pi-ai ≥0.66), else fall back to constructor (gsd-pi etc.)
 const _piAi = piAi as any;
@@ -164,10 +164,8 @@ const ASKCLAUDE_ALWAYS_BLOCKED = [
 	"ToolSearch", // probes for blocked tools, wastes tokens
 	"ScheduleWakeup", // no harness to fire wakeup from inside a delegated subagent
 ];
-const MODE_DISALLOWED_TOOLS: Record<string, string[]> = {
-	full: [
-		...ASKCLAUDE_ALWAYS_BLOCKED,
-	],
+const MODE_DISALLOWED_TOOLS: Record<AskClaudeMode, string[]> = {
+	full: ASKCLAUDE_ALWAYS_BLOCKED,
 	read: [
 		...ASKCLAUDE_ALWAYS_BLOCKED,
 		"Write", "Edit", "Bash", "NotebookEdit",
@@ -1786,7 +1784,7 @@ async function promptAndWait(
 	}
 
 	// Mode → disallowed tools
-	const disallowedTools = MODE_DISALLOWED_TOOLS[mode] ?? [];
+	const disallowedTools = MODE_DISALLOWED_TOOLS[mode];
 
 	// No omp skills here: omp addresses them as `skill://<name>`, which only omp's own
 	// read tool resolves, and AskClaude runs on Claude Code's native Read.
@@ -1917,9 +1915,6 @@ async function promptAndWait(
 }
 
 // --- Extension registration ---
-
-const DEFAULT_TOOL_DESCRIPTION_FULL = "Delegate to Claude Code for a second opinion or analysis (code review, architecture questions, debugging theories), or to autonomously handle a task. Defaults to read-only mode — use full mode when the user wants to delegate a task that requires changes. Prefer to handle straightforward tasks yourself.";
-const DEFAULT_TOOL_DESCRIPTION = "Delegate to Claude Code for a second opinion or analysis (code review, architecture questions, debugging theories). Read-only — Claude Code can explore the codebase but not make changes. Prefer to handle straightforward tasks yourself.";
 
 // The slice of the host's TUI theme the AskClaude renderers use.
 type Theme = { fg(color: any, text: string): string; bold(text: string): string };
@@ -2080,39 +2075,22 @@ export default function (pi: ExtensionAPI) {
 	// --- AskClaude tool ---
 
 	const askConf = config.askClaude;
-	const allowFull = askConf?.allowFullMode !== false;
-	const defaultMode = askConf?.defaultMode ?? "read";
-	const defaultIsolated = askConf?.defaultIsolated ?? false;
+	const askDefaults = resolveAskClaudeDefaults(askConf);
 	askClaudeToolName = askConf?.name ?? "AskClaude";
 
-	const modeValues = allowFull ? ["read", "full", "none"] as const : ["read", "none"] as const;
-	let modeDesc = `"read" (default): questions about the codebase — review, analysis, explain. "none": general knowledge only (no file access).`;
-	if (allowFull) modeDesc += ` "full": allows writing and bash execution (careful: runs without feedback to pi).`;
-
 	if (askConf?.enabled) {
-		const askClaudeParams = Type.Object({
-			prompt: Type.String({ description: "The question or task for Claude Code. By default Claude sees the full conversation history. Don't research up front, let Claude explore." }),
-			mode: Type.Optional(StringEnum(modeValues, { description: modeDesc })),
-			model: Type.Optional(Type.String({ description: 'Claude model (e.g. "opus", "sonnet", "haiku", or full ID). Defaults to "opus".' })),
-			thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh"] as const, { description: "Thinking effort level. Omit to use Claude Code's default." })),
-			isolated: Type.Optional(Type.Boolean({ description: "When true, Claude sees only this prompt (clean session). When false (default), Claude sees the full conversation history." })),
-		});
+		const askClaudeParams = buildAskClaudeParams(askDefaults);
 		pi.registerTool<typeof askClaudeParams>({
 			name: askConf?.name ?? "AskClaude",
 			label: askConf?.label ?? "Ask Claude Code",
-			description: askConf?.description ?? (allowFull ? DEFAULT_TOOL_DESCRIPTION_FULL : DEFAULT_TOOL_DESCRIPTION),
+			description: askClaudeToolDescription(askDefaults, askConf?.description),
 			parameters: askClaudeParams,
 			// omp renders a call as (args, options, theme); pi as (args, theme). Take the theme
 			// from whichever position carries one.
 			renderCall(args, ...rest: unknown[]) {
 				const theme = rest.find((r): r is Theme => typeof (r as Theme | undefined)?.fg === "function")!;
 				let text = theme.fg("mdLink", theme.bold("AskClaude "));
-				const mode = args.mode ?? defaultMode;
-				const tags: string[] = [];
-				if (mode !== defaultMode) tags.push(`mode=${mode}`);
-				if (args.model) tags.push(`model=${args.model}`);
-				if (args.thinking) tags.push(`thinking=${args.thinking}`);
-				if (args.isolated) tags.push("isolated");
+				const tags = askClaudeCallTags(args, askDefaults);
 				if (tags.length) text += `${theme.fg("accent", `[${tags.join(", ")}]`)} `;
 				const truncated = args.prompt.length > PREVIEW_MAX_CHARS ? args.prompt.substring(0, PREVIEW_MAX_CHARS) : args.prompt;
 				const lines = truncated.split("\n").slice(0, PREVIEW_MAX_LINES);
@@ -2160,8 +2138,8 @@ export default function (pi: ExtensionAPI) {
 					};
 				}
 
-				const mode = (params.mode ?? defaultMode) as "full" | "read" | "none";
-				const isolated = params.isolated ?? defaultIsolated;
+				const mode = resolveAskClaudeMode(params.mode, askDefaults);
+				const isolated = params.isolated ?? askDefaults.isolated;
 				const toolCalls = new Map<string, ToolCallState>();
 				const start = Date.now();
 
