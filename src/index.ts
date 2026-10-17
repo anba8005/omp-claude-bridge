@@ -54,22 +54,28 @@ const RECORD_STREAM_PATH = process.env.CLAUDE_BRIDGE_RECORD_STREAM;
 //   out of a pi session, which serves its own tools.
 // - DISABLE_AUTO_COMPACT=1: pi owns compaction; CC compacting its own copy would
 //   diverge from pi's history, which is the source of truth for every rebuild.
+// - CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH=16384: CC cuts an MCP tool description
+//   at 2048 characters by default (2.1.293, the SDK's bundled CLI), silently. Every
+//   omp tool reaches CC over MCP, and `task` ends its ~3.8K description with the
+//   agent list, which the cut removed whole.
 const CC_CHILD_ENV = {
 	ENABLE_CLAUDEAI_MCP_SERVERS: "0",
 	DISABLE_AUTO_COMPACT: "1",
+	CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: "16384",
 } as const;
 
-// omp owns context files on the provider path (they arrive in <project-context>),
-// so Claude Code must not load its own on top: otherwise project CLAUDE.md/AGENTS.md
-// files arrive twice, and ~/.claude/CLAUDE.md — a user persona written for a
-// harness that is not the one running — arrives at all, stamped "These
-// instructions OVERRIDE any default behavior" and outranking omp's own context.
+// Claude Code must not load its own context files. On the provider path omp
+// forwards them (in <project-context>), so project CLAUDE.md/AGENTS.md files would
+// arrive twice, and ~/.claude/CLAUDE.md — a user persona written for a harness
+// that is not the one running — would arrive at all, stamped "These instructions
+// OVERRIDE any default behavior" and outranking omp's own context.
 //
-// Excludes rather than settingSources: the source gate that suppresses CLAUDE.md
-// is the same one that reads settings.json, where Bedrock/Vertex users keep
-// `env` and `apiKeyHelper`. Patterns are matched with picomatch against absolute
-// paths; the filename globs cover user, ancestor, project and .claude/ copies,
-// while rules need their own. Managed/policy memory is not excludable by design.
+// The provider path loads no filesystem settings (settingSources: []), and
+// CLAUDE.md goes with them. AskClaude keeps the user's and project's settings, so
+// it excludes the files by pattern instead. Patterns are matched with picomatch
+// against absolute paths; the filename globs cover user, ancestor, project and
+// .claude/ copies, while rules need their own. Managed/policy memory is not
+// excludable by design.
 const CLAUDE_MD_EXCLUDES = ["**/CLAUDE.md", "**/AGENTS.md", "**/.claude/rules/**"];
 
 // Ensure the debug log directory exists when debug is enabled
@@ -909,7 +915,6 @@ export const __test = {
 	resultErrorText,
 	deliverToolResults,
 	drainForAbort,
-	CC_CHILD_ENV,
 	buildMcpServers,
 };
 
@@ -1369,16 +1374,21 @@ function processAssistantMessage(message: SDKMessage, model: Model<any>, customT
 	// fails over before output commits (pi-model-fallback-alias) then cannot reach the
 	// next provider. Keep the wording on the failed turn — the error event carries it —
 	// but emit no events, so the turn still reads as a call that produced no output.
-	// Issue #162.
+	// Issue #162. For a rate-limit rejection the turn stays empty too (issue #195).
 	if (assistantMsg.model === "<synthetic>") {
 		// The report can follow a stalled stream whose non-streaming retry also failed;
 		// drop the abandoned partial blocks (unsigned thinking, a tool call CC will never
 		// dispatch) the way the fallback path below would.
 		if (c.turnSawStreamEvent && c.turnStreamOpen) dropAbandonedStreamBlocks(c, "synthetic failure report");
 		debug(`processAssistantMessage: <synthetic> message, keeping ${assistantMsg.content.length} block(s) off the stream`);
+		// A rate-limit rejection leaves the turn empty: the error carries the wording, and
+		// omp only retries or walks retry.fallbackChains for a failed turn with no text.
+		// Other failures keep their wording as the turn's content.
+		const keepText = c.rateLimitRejection === null;
 		for (const block of assistantMsg.content) {
-			if (block.type === "text" && block.text) c.turnBlocks.push({ type: "text", text: block.text });
-			else debug("processAssistantMessage: unhandled <synthetic> block type", block.type);
+			if (block.type === "text" && block.text) {
+				if (keepText) c.turnBlocks.push({ type: "text", text: block.text });
+			} else debug("processAssistantMessage: unhandled <synthetic> block type", block.type);
 		}
 		if (assistantMsg.usage && c.turnOutput) recordUsage(c.turnOutput, assistantMsg.usage, model);
 		return;
@@ -1940,8 +1950,8 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// MCP auto-loading suppression: CC reads MCP servers from ~/.claude.json (top-level
 	// + per-project) and .mcp.json. Since pi executes tools (not CC), those are pure
 	// token overhead. --strict-mcp-config tells the binary to use ONLY mcpServers passed
-	// programmatically and ignore filesystem MCP entries — applied unconditionally because
-	// settingSources is left at CC's default, which loads all sources.
+	// programmatically and ignore filesystem MCP entries — applied unconditionally, so
+	// MCP isolation does not lean on settingSources.
 	const strictMcpConfigEnabled = providerSettings.strictMcpConfig !== false;
 	const claudeExecutable = providerSettings.pathToClaudeCodeExecutable;
 
@@ -1955,7 +1965,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 
 	// Suppress claude.ai cloud MCP servers (Figma/Canva/etc. auto-discovered via OAuth
 	// when the user is logged into Anthropic). These are a separate code path from
-	// filesystem MCP and are NOT blocked by --strict-mcp-config or settingSources=undefined.
+	// filesystem MCP and are NOT blocked by --strict-mcp-config.
 	// The native CC binary gates them on env var ENABLE_CLAUDEAI_MCP_SERVERS: setting it
 	// to "0"/"false"/"no"/"off" makes the loader return early before any cloud fetch.
 	// DISABLE_AUTO_COMPACT=1: pi owns context-management and propagates its own
@@ -1968,6 +1978,14 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		cwd,
 		env: childEnv,
 		tools: [],
+		// No filesystem settings: ~/.claude/settings.json and the project's
+		// .claude/settings*.json carry hooks that would run on every turn (and can
+		// add context to the prompt), plugins, outputStyle (rewrites the preset),
+		// permissions and CLAUDE.md. None of that belongs to an omp session. The cost:
+		// `env` and `apiKeyHelper` from settings.json are not read here, so Bedrock and
+		// Vertex are configured through the process environment. Subscription login is
+		// not a settings source; the compact-summary path has always run this way.
+		settingSources: [] as SettingSource[],
 		permissionMode: "bypassPermissions",
 		includePartialMessages: true,
 		// includeGitInstructions:false drops the gitStatus block from the preset.
@@ -1981,7 +1999,6 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		// AskClaude keeps CC's native tools and its guidance — unaffected.
 		settings: {
 			...claudeCodeSettings(providerSettings),
-			claudeMdExcludes: CLAUDE_MD_EXCLUDES,
 			includeGitInstructions: false,
 		},
 		systemPrompt: {

@@ -30,7 +30,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
@@ -565,6 +565,97 @@ function stubApi(requests) {
 /** cache_control markers are breakpoint directives, not cache-keyed content — CC 2.1.280
  *  moves them (and a 1h ttl) between turns, so payload comparisons strip them. */
 const sansCacheControl = (m) => JSON.parse(JSON.stringify(m, (_k, v) => (v === null || v === undefined) ? v : (typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).filter(([key]) => key !== "cache_control")) : v)));
+
+// --- MCP tool description cap ---
+
+test("CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH lifts CC's cap on MCP tool descriptions", { timeout: 120_000 }, async () => {
+	// omp's descriptions run long — `task` ends with its agent list — and CC cuts an
+	// MCP tool description at its default cap (2048 on 2.1.293) without a word, so the
+	// tail the model needs never reaches it. src/index.ts CC_CHILD_ENV raises the cap.
+	const requests = [];
+	const api = await stubApi(requests);
+	const tail = `description-tail-${randomUUID()}`;
+	const description = `${"Long tool description. ".repeat(400)}${tail}`;
+	try {
+		for (const cap of [undefined, "16384"]) {
+			const env = { ...process.env, ANTHROPIC_BASE_URL: api.url, ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1" };
+			delete env.CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH;
+			if (cap) env.CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH = cap;
+			const { result } = await collect(query({
+				prompt: "Reply OK.",
+				options: providerOptions({
+					env, maxTurns: 1, persistSession: false,
+					mcpServers: toolServer([{ ...noArgTool("long"), description }], []),
+				}),
+			}));
+			assert.equal(result?.subtype, "success");
+			const tool = requests.at(-1)?.tools?.find((t) => t.name === "mcp__custom-tools__long");
+			assert.ok(tool, "CC did not advertise the MCP tool");
+			assert.equal(tool.description.includes(tail), Boolean(cap), cap
+				? `CC still truncated the description at ${tool.description.length} chars`
+				: "CC no longer truncates MCP descriptions by default — CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH may be dead weight");
+		}
+	} finally {
+		api.close();
+	}
+});
+
+// --- Filesystem settings isolation ---
+
+test("settingSources: [] keeps user and project settings out — no hooks, no CLAUDE.md or AGENTS.md", { timeout: 120_000 }, async () => {
+	// The provider path runs with settingSources: [] so the user's ~/.claude estate —
+	// hooks on every turn, plugins, outputStyle, CLAUDE.md — neither runs nor reaches
+	// the request. CC's default (all sources) is the control that proves the fixtures load.
+	const requests = [];
+	const api = await stubApi(requests);
+	const root = mkdtempSync(join(tmpdir(), "cc-setting-sources-"));
+	const configDir = join(root, "config");
+	const cwd = join(root, "project");
+	const userHookFired = join(root, "user-hook-fired");
+	const projectHookFired = join(root, "project-hook-fired");
+	const userMarker = `user-instructions-${randomUUID()}`;
+	const projectMarker = `project-instructions-${randomUUID()}`;
+	const hookSettings = (fired) => JSON.stringify({
+		hooks: { UserPromptSubmit: [{ hooks: [{ type: "command", command: `touch ${JSON.stringify(fired)}` }] }] },
+	});
+	mkdirSync(configDir);
+	mkdirSync(join(cwd, ".claude"), { recursive: true });
+	writeFileSync(join(configDir, "settings.json"), hookSettings(userHookFired));
+	writeFileSync(join(configDir, "CLAUDE.md"), userMarker);
+	writeFileSync(join(cwd, ".claude", "settings.json"), hookSettings(projectHookFired));
+	writeFileSync(join(cwd, "AGENTS.md"), projectMarker);
+	try {
+		for (const isolated of [false, true]) {
+			rmSync(userHookFired, { force: true });
+			rmSync(projectHookFired, { force: true });
+			const { result } = await collect(query({
+				prompt: "Reply OK.",
+				options: providerOptions({
+					cwd, maxTurns: 1, persistSession: false,
+					env: {
+						...process.env, CLAUDE_CONFIG_DIR: configDir, ANTHROPIC_API_KEY: "sk-ant-stub", ANTHROPIC_BASE_URL: api.url,
+						ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1",
+					},
+					...(isolated ? { settingSources: [] } : {}),
+				}),
+			}));
+			assert.equal(result?.subtype, "success");
+			const request = JSON.stringify(requests.at(-1));
+			const loaded = !isolated;
+			assert.deepEqual({
+				userHook: existsSync(userHookFired),
+				projectHook: existsSync(projectHookFired),
+				userClaudeMd: request.includes(userMarker),
+				projectAgentsMd: request.includes(projectMarker),
+			}, { userHook: loaded, projectHook: loaded, userClaudeMd: loaded, projectAgentsMd: loaded }, isolated
+				? "settingSources: [] let user or project settings through"
+				: "control: CC loaded none of a fixture by default, so the isolation half proves nothing");
+		}
+	} finally {
+		api.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
 
 // --- Native instruction exclusions ---
 

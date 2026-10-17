@@ -38,6 +38,7 @@ Claude Code keeps its own `claude_code` system prompt; omp's prompt is appended 
 
 - **omp's harness block** (the "You are omp's trusted coding assistant" template) is not forwarded — it describes omp's own tool loop. Only its `<skills>`, `<generic-rules>` and `<domain-rules>` sections are carried over. Skills and domain rules are listed with an instruction to read `skill://<name>` / `rule://<name>` through the bridged `read` tool, and are left out when `read` is not available.
 - **Everything else is forwarded verbatim**: the `<project-context>` block (your `AGENTS.md`/`CLAUDE.md` context files, workstation, workspace roots), blocks other extensions add in `before_agent_start`, and a custom system prompt if you set one.
+- **Nothing from Claude Code's own settings**: the provider runs Claude Code without `~/.claude/settings.json` or the project's `.claude/settings*.json` — no hooks, plugins, output style, permissions or `CLAUDE.md` of its own. An `env` block or `apiKeyHelper` there (Bedrock, Vertex) is not read either; set those variables in omp's environment.
 
 ### Summaries, `/clear`, and session switches
 
