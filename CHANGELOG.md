@@ -30,6 +30,7 @@
 - **Fix: synthetic failure notices no longer stream as assistant output** — Claude Code reports an API failure or subscription limit as a `<synthetic>` assistant message before the failing result; streamed as text, it made the turn look committed, so omp's retry and model fallback never fired. The notice stays on the failed turn's error event, and one following a stalled stream also drops the dead stream's partial blocks. Backport of upstream `1cb9caf`, `7a7f699` and `df907db` (elidickinson/pi-claude-bridge#163, issue #162).
 - **Fix: duplicate AGENTS.md instructions** — omp already forwards the project's context files in `<project-context>`, and Claude Code loads `AGENTS.md` natively as well, so the instructions arrived twice; its native copy is excluded, as `CLAUDE.md` already was. Backport of upstream `4f076aa` (issue #151).
 - **Tests: the unit suite runs against a throwaway HOME** — the preload points `HOME`, the agent dir, the session dir, `CLAUDE_CONFIG_DIR` and the bridge log at a temp root, and the config tests swap the agent dir along with `HOME`, so a run can no longer overwrite the developer's real `claude-bridge.json`. Backport of the test half of upstream `e870bc8` (issue #164).
+- **Fix: hang when a stream is cut right after a tool call starts** — tool calls dispatch only once their block closes, so omp no longer gets a `{}`-argument call Claude Code has dropped and re-issued. Backport of upstream `ddce5f8` (elidickinson/pi-claude-bridge#146, thanks @andreypopp).
 
 ## 0.8.0 — 2026-09-20
 
