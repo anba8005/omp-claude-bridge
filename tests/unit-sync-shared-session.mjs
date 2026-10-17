@@ -34,7 +34,7 @@ describe("syncSharedSession", () => {
 
 			assert.equal(result.sessionId, null, "a reminder ahead of the first prompt is part of the prompt, not prior history");
 			assert.equal(result.preserveSharedSession, undefined);
-			assert.equal(__test.getSharedSession(), null, "a clean start must not create a session state");
+			assert.equal(__test.getSharedSession(null), null, "a clean start must not create a session state");
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
 		}
@@ -44,7 +44,7 @@ describe("syncSharedSession", () => {
 	// appending a reminder, so the same conversation arrives shorter than the cursor with no
 	// event to mark it. It must rebuild from what omp still has — not take the subagent
 	// branch, which runs the turn with no history at all.
-	it("rebuilds when its own conversation arrives rewound, but leaves the session to a foreign one", () => {
+	it("rebuilds when its own conversation arrives rewound, and a subagent never touches it", () => {
 		const cwd = mkdtempSync(join(tmpdir(), "sync-shared-session-"));
 		const sessionId = randomUUID();
 		const t0 = 1_760_000_000_000;
@@ -60,21 +60,21 @@ describe("syncSharedSession", () => {
 				{ role: "assistant", content: [{ type: "text", text: "Hello." }] },
 			]);
 			seeded.save();
-			const shared = { sessionId, cursor: 3, cwd, origin: __test.conversationOrigin(history) };
+			const shared = { sessionId, cursor: 3, cwd, piSessionId: "parent", origin: __test.conversationOrigin(history) };
 
-			__test.setSharedSession(shared);
-			const subagent = __test.syncSharedSession([{ role: "user", content: "Search the repo", timestamp: t0 + 50 }], cwd);
-			assert.equal(subagent.sessionId, null);
-			assert.equal(subagent.preserveSharedSession, true, "another conversation must not touch the shared session");
+			__test.setSharedSession("parent", shared);
+			const subagent = __test.syncSharedSession(
+				[{ role: "user", content: "Search the repo", timestamp: t0 + 50 }], cwd, undefined, undefined, "child");
+			assert.equal(subagent.sessionId, null, "a subagent starts clean in its own mirror");
+			assert.deepEqual(__test.getSharedSession("parent"), shared, "the parent's mirror is untouched");
 
-			__test.setSharedSession(shared);
 			const retry = __test.syncSharedSession(
 				[...history, { role: "user", content: "Stopped without actionable output", timestamp: t0 + 4 }],
-				cwd,
+				cwd, undefined, undefined, "parent",
 			);
 			assert.equal(retry.sessionId, sessionId, "the rewound conversation rebuilds in place and resumes");
 			assert.equal(retry.preserveSharedSession, undefined);
-			assert.equal(__test.getSharedSession()?.cursor, 2);
+			assert.equal(__test.getSharedSession("parent")?.cursor, 2);
 			const session = openSession({ sessionId, projectPath: cwd });
 			assert.deepEqual(session.messages.map((m) => m.type), ["user", "assistant"], "the retry keeps its history");
 		} finally {
@@ -96,7 +96,7 @@ describe("syncSharedSession", () => {
 				{ role: "assistant", content: [{ type: "text", text: "Hello." }] },
 			]);
 			seeded.save();
-			__test.setSharedSession({ sessionId, cursor: 2, cwd });
+			__test.setSharedSession(null, { sessionId, cursor: 2, cwd });
 
 			const context = __test.toBridgeContext({
 				messages: [
@@ -109,7 +109,7 @@ describe("syncSharedSession", () => {
 			const result = __test.syncSharedSession(context.messages, cwd);
 
 			assert.equal(result.sessionId, sessionId, "2 priors at cursor 2 must resume, not rebuild");
-			assert.equal(__test.getSharedSession()?.cursor, 2, "an empty developer message is not history");
+			assert.equal(__test.getSharedSession(null)?.cursor, 2, "an empty developer message is not history");
 			const session = openSession({ sessionId, projectPath: cwd });
 			assert.deepEqual(
 				session.messages.map((m) => m.type),
@@ -136,7 +136,7 @@ describe("syncSharedSession", () => {
 				cursor: 42,
 				cwd,
 			};
-			__test.setSharedSession(mainSession);
+			__test.setSharedSession(null, mainSession);
 
 			const result = __test.syncSharedSession([
 				{
@@ -156,7 +156,7 @@ describe("syncSharedSession", () => {
 				true,
 				"the fresh session must not replace the parent's when it completes",
 			);
-			assert.deepEqual(__test.getSharedSession(), mainSession);
+			assert.deepEqual(__test.getSharedSession(null), mainSession);
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
 		}
@@ -191,7 +191,7 @@ describe("syncSharedSession", () => {
 			);
 			seeded.save();
 
-			__test.setSharedSession({ sessionId, cursor: 0, cwd });
+			__test.setSharedSession(null, { sessionId, cursor: 0, cwd });
 			__test.setPiUI({ notify: (message) => notices.push(message) });
 			__test.syncSharedSession([
 				{ role: "user", content: prompt, timestamp: Date.now() },
