@@ -25,15 +25,6 @@ export interface Config {
 		strictMcpConfig?: boolean;
 		autoMemoryEnabled?: boolean;
 		pathToClaudeCodeExecutable?: string;
-		// Subscription plan tier. Setting to "max" enables Opus 4.6 at 1M context
-		plan?: "pro" | "max";
-		// Set to true to opt into metered 1M context usage ("extra usage" in
-		// Anthropic billing). Enables Sonnet 4.6 [1m] on every plan and Opus 4.6
-		// [1m] on Pro.
-		longContextExtraUsage?: boolean;
-		// Model ids (e.g. "claude-future-9") whose declared 1M context Claude Code
-		// does not actually serve; pins them to the bare id at 200K.
-		forceTwoHundredK?: string[];
 	};
 }
 

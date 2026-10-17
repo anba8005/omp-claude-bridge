@@ -26,17 +26,12 @@ assert.doesNotMatch(stderr, /Failed to load extension/, stderr);
 
 const { models } = JSON.parse(result.stdout);
 const bridge = models.filter((model) => model.provider === "claude-bridge");
-assert.ok(bridge.length > 0, "the extension registered no claude-bridge models");
+assert.deepEqual(bridge.map((model) => model.id).sort(), ["haiku", "opus", "sonnet"], "the extension registers Claude Code's aliases only");
 for (const model of bridge) {
-	assert.match(model.id, /^claude-/, `unexpected model id ${model.id}`);
-	assert.ok(!/-20\d{6}$/.test(model.id), `dated snapshot alias ${model.id} leaked into the picker`);
-	assert.ok(model.contextWindow === 200_000 || model.contextWindow === 1_000_000, `${model.id}: contextWindow ${model.contextWindow}`);
+	assert.equal(model.contextWindow, 1_000_000, `${model.id}: contextWindow ${model.contextWindow}`);
+	// The efforts must reach omp's picker; without them it falls back to a generic
+	// minimal..high list.
+	assert.deepEqual(model.thinking, ["low", "medium", "high", "xhigh", "max"], `${model.id}: thinking ${JSON.stringify(model.thinking)}`);
 }
-// The catalog's per-model efforts must reach omp's picker; without them every
-// model falls back to a generic minimal..high list.
-assert.ok(
-	bridge.some((model) => Array.isArray(model.thinking) && model.thinking.includes("max")),
-	"no bridge model exposes the max effort: the catalog's thinking metadata was dropped",
-);
 
-console.log(`omp loaded ${entry}: ${bridge.length} claude-bridge models (${bridge.filter((m) => m.contextWindow === 1_000_000).length} at 1M)`);
+console.log(`omp loaded ${entry}: claude-bridge/${bridge.map((m) => m.id).join(", claude-bridge/")}`);

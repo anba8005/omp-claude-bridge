@@ -1,6 +1,5 @@
 import { calculateCost, StringEnum, type AssistantMessage, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TextContent, type Tool, type UserMessage } from "@earendil-works/pi-ai";
 import * as piAi from "@earendil-works/pi-ai";
-import { getModels } from "@earendil-works/pi-ai/compat";
 import { buildSessionContext, getAgentDir, keyHint, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { query, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
@@ -10,7 +9,7 @@ import { createSession, deleteSession, openSession, repairToolPairing } from "cc
 import { appendFileSync, mkdirSync, realpathSync, statSync } from "fs";
 import { dirname, join } from "path";
 import { PROVIDER_ID, messageContentToText, convertPiMessages } from "./convert.js";
-import { applyLongContext, buildModels, claudeCodeModelId, effortFor, type LongContextSettings, resolveModel as _resolveModel } from "./models.js";
+import { effortFor, MODELS } from "./models.js";
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX } from "./skills.js";
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
@@ -142,14 +141,7 @@ const SDK_TO_PI_TOOL_NAME: Record<string, string> = {
 	read: "read", write: "write", edit: "edit", bash: "bash",
 };
 
-// MODELS is buildModels(getModels("anthropic")) — projection kept in models.js.
-const MODELS = buildModels(getModels("anthropic"));
 let providerSettings: NonNullable<Config["provider"]> = {};
-let longContextSettings: LongContextSettings = { plan: "pro", longContextExtraUsage: false };
-
-function resolveModel(input: string) {
-	return _resolveModel(MODELS, input);
-}
 
 // --- Error handling ---
 
@@ -465,10 +457,11 @@ async function runIsolatedSummary(
 		const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
 		const compactProviderSettings = loadConfig(cwd).provider;
 		const claudeExecutable = compactProviderSettings?.pathToClaudeCodeExecutable;
-		const cliModel = claudeCodeModelId(model, longContextSettings);
+		// The registered id is a Claude Code alias (see models.ts), passed as-is.
+		const cliModel = model.id;
 		// The summarizer asks for its own reasoning level (omp's compaction threads the
 		// session's); without it Claude Code would summarize at its default effort.
-		const effort = effortFor(model, options?.reasoning);
+		const effort = effortFor(options?.reasoning);
 		debug(`compact summary: spawn model=${cliModel} registeredModel=${model.id} effort=${effort ?? "default"} promptLen=${promptText.length}`);
 
 		sdkQuery = query({
@@ -813,8 +806,8 @@ let piUI: ExtensionUIContext | null = null;
 let piMode: ExtensionContext["mode"] | null = null;
 const activeQueryContexts = new Set<QueryContext>();
 
-// Defaults that silently cost the user something (no Opus 1M on Max, no
-// AskClaude tool) are announced once. Deferred to the first bridge query rather
+// Defaults that silently cost the user something (no AskClaude tool) are
+// announced once. Deferred to the first bridge query rather
 // than session_start: the notice persists a flag to the global config, and
 // firing it on startup would write that file for every pi session that merely
 // has this extension installed. One message, because consecutive info notifies
@@ -1527,9 +1520,8 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	queryCtx.latestCursor = 0;
 
 	const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
-	// cliModel is the actual id sent to Claude Code (may carry [1m]); model.id is the
-	// pi-registered id. Log cliModel so debug lines reflect what CC actually received.
-	const cliModel = claudeCodeModelId(model, longContextSettings);
+	// The registered id is a Claude Code alias (see models.ts), passed as-is.
+	const cliModel = model.id;
 	const syncResult = syncSharedSession(context.messages, cwd, customToolNameToSdk, cliModel);
 	const { sessionId: resumeSessionId } = syncResult;
 	const promptBlocks = extractUserPromptBlocks(context.messages);
@@ -1570,8 +1562,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const strictMcpConfigEnabled = providerSettings.strictMcpConfig !== false;
 	const claudeExecutable = providerSettings.pathToClaudeCodeExecutable;
 
-	// Clamped to the efforts omp's catalog lists for this model (see effortFor).
-	const effort = effortFor(model, options?.reasoning);
+	const effort = effortFor(options?.reasoning);
 
 	const extraArgs: Record<string, string | null> = { model: cliModel };
 	if (strictMcpConfigEnabled) extraArgs["strict-mcp-config"] = null;
@@ -1759,10 +1750,8 @@ async function promptAndWait(
 	},
 ): Promise<{ responseText: string; stopReason: string }> {
 	const cwd = process.cwd();
-	const requestedModel = options?.model ?? "opus";
-	const model = resolveModel(requestedModel);
-	const modelId = model?.id ?? requestedModel;
-	const cliModel = model ? claudeCodeModelId(model, longContextSettings) : modelId;
+	// An alias (opus, sonnet, haiku) or a full model id; Claude Code resolves either.
+	const cliModel = options?.model ?? "opus";
 
 	// Session resume for shared mode — reuse provider's session if it exists,
 	// otherwise create one from pi's context.
@@ -1789,8 +1778,7 @@ async function promptAndWait(
 	// read tool resolves, and AskClaude runs on Claude Code's native Read.
 
 	// Effort
-	const effort = options?.thinking && options.thinking !== "off"
-		? effortFor(model ?? {}, options.thinking) : undefined;
+	const effort = effortFor(options?.thinking);
 
 	const claudeExecutable = providerSettings.pathToClaudeCodeExecutable;
 
@@ -1801,7 +1789,7 @@ async function promptAndWait(
 	if (effort) extraArgs["thinking-display"] = "summarized";
 
 	debug("askClaude:",
-		`mode=${mode} model=${modelId} cliModel=${cliModel} effort=${effort ?? "default"}`,
+		`mode=${mode} model=${cliModel} effort=${effort ?? "default"}`,
 		`isolated=${options?.isolated ?? false} resume=${resumeSessionId?.slice(0, 8) ?? "none"}`,
 		`promptLen=${prompt.length}`);
 
@@ -1934,24 +1922,8 @@ export default function (pi: ExtensionAPI) {
 	const config = loadConfig(process.cwd());
 	debug("loadConfig:", JSON.stringify(config));
 	providerSettings = config.provider ?? {};
-	// We need these settings to know if we're eligible for 1M context on certain models
-	// Validate at the boundary: a non-array here would throw inside every
-	// claudeCodeModelId call and brick the extension at activation.
-	const forceTwoHundredK = Array.isArray(providerSettings.forceTwoHundredK)
-		? providerSettings.forceTwoHundredK.filter((id): id is string => typeof id === "string")
-		: undefined;
-	longContextSettings = {
-		plan: providerSettings.plan ?? "pro",
-		longContextExtraUsage: providerSettings.longContextExtraUsage ?? false,
-		forceTwoHundredK,
-	};
-	const registeredModels = applyLongContext(MODELS, longContextSettings);
-	if (registeredModels.length === 0) {
-		console.error("claude-bridge: no models available from the host's anthropic catalog — update omp");
-	}
 
 	if (!config.startupNoticeShown) {
-		if (config.provider?.plan === undefined) pendingNotices.push('Are you using a Max plan? You need to set provider.plan to "max" to unlock 1M context in Opus.');
 		if (config.askClaude?.enabled === undefined) pendingNotices.push("The AskClaude tool is opt-in only. Set askClaude.enabled to use it.");
 	}
 
@@ -2070,7 +2042,7 @@ export default function (pi: ExtensionAPI) {
 		baseUrl: "claude-bridge",
 		apiKey: "not-used",
 		api: "claude-bridge",
-		models: registeredModels,
+		models: MODELS,
 		// Cast: pi-ai AssistantMessageEventStream diamond dep between pi-coding-agent and pi-agent-core
 		streamSimple: streamClaudeAgentSdk as any,
 	};

@@ -10,10 +10,11 @@
 - **Fix: omp `developer` messages** — sent as user turns and skipped when empty, as omp's own Anthropic provider does, so a date/cwd reminder no longer breaks cursor arithmetic or forces a clean start.
 - **Fix: `/clear` rebuilds the Claude Code session** — omp marks it with a `reset_boundary` entry and no event; the bridge detects a new boundary at `before_agent_start` and rebuilds instead of resuming the cleared conversation, or running every later turn without history.
 - **Fix: session switches** — omp's `session_switch` and `session_branch` events (and `session_start` with a `new`/`resume`/`fork` reason) drop the shared CC session.
-- **Fix: per-model thinking levels and effort** — catalog `thinking` metadata is passed through so omp's picker offers each model's real efforts (Opus 5.5 low..max, Sonnet 4.6 low..high), and `effortFor` maps the chosen level onto Claude Code's effort, clamped to what the model supports; budget-thinking models map minimal..xhigh onto low..max.
 - **Fix: AskClaude under omp** — `renderCall` accepts omp's argument order, and the circular-delegation guard recognises the bridge by provider id.
 - **Remove: `askClaude.appendSkills`** — AskClaude children get no omp skills.
 - **Tests: omp shapes** — new suites for prompt projection, developer messages and reset boundaries, and effort mapping; pi-only suites for the removed capture, transcript replay, AGENTS.md loader and branch-summary takeover are deleted.
+- **Add: models are Claude Code's `opus`, `sonnet` and `haiku` aliases** — the bridge registers `claude-bridge/opus`, `claude-bridge/sonnet` and `claude-bridge/haiku` and passes the alias to Claude Code as-is, which resolves it to the newest model of the family (today Opus 5.5, Sonnet 5.5 and Haiku 5.5) with the 1M context window by default, so no `[1m]` suffix is sent and a new model needs no bridge or omp update. Each is registered with 1M context, 128K output and every effort level (low..max); omp's thinking level is sent as Claude Code's effort, minimal as low. Replaces upstream's catalog-driven model list and its measured-1M list, so upstream's later per-model entries (Opus 5.5 in `5919fff`, Sonnet 5.5 in `a78a2a5`, Haiku 5.5 in `265e166`) are not backported.
+- **Remove: `provider.plan`, `provider.longContextExtraUsage` and `provider.forceTwoHundredK`** — they gated `[1m]` ids on older models the bridge no longer registers; the startup notice no longer asks for `provider.plan`.
 
 ## 0.8.0 — 2026-09-20
 

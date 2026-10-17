@@ -21,7 +21,7 @@ const { __test } = await import("../src/index.js");
 
 // `cost` matters: a recorded stream carries real usage, so consumeQuery reaches
 // pi-ai's cost calculation, which the hand-built streams never exercise. Zeros are
-// what buildModels ships (src/models.ts) since Claude Code billing is per-plan.
+// what src/models.ts registers, since Claude Code billing is per-plan.
 const model = {
 	api: "anthropic-messages", provider: "anthropic", id: "claude-haiku-4-5",
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },

@@ -4,7 +4,7 @@
 
 [omp](https://github.com/can1357/oh-my-pi) extension that integrates Claude Code via the [Agent SDK](https://github.com/anthropics/claude-agent-sdk-typescript). It is a port of [pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge) by Eli Dickinson (from its 0.8.0 release) to omp's provider contract; all the streaming, MCP tool bridging, session sync and resume machinery is upstream's.
 
-1. **Provider** — Use Opus/Sonnet/Haiku/Fable as models in omp, with all tool calls flowing through omp's TUI
+1. **Provider** — Use Claude Opus, Sonnet and Haiku as models in omp, with all tool calls flowing through omp's TUI
 2. **AskClaude tool** — Delegate tasks or questions to Claude Code when using another provider
 
 **Using pi rather than omp?** Install upstream [`pi-claude-bridge`](https://www.npmjs.com/package/pi-claude-bridge). This package registers only an `omp` entry and follows omp's system-prompt, message and event shapes.
@@ -26,15 +26,11 @@ Verified against omp 18.8.9. Claude Code must be logged in (`claude` → `/login
 
 ## Provider
 
-Use `/model` to select any Claude model in omp's Anthropic catalog, e.g. `claude-bridge/claude-opus-5-5`, `claude-bridge/claude-fable-5-1`, or `claude-bridge/claude-haiku-4-5`.
+Use `/model` to select `claude-bridge/opus`, `claude-bridge/sonnet` or `claude-bridge/haiku`. These are Claude Code's [model aliases](https://code.claude.com/docs/en/model-config#model-aliases), passed to it as-is: Claude Code resolves each to the newest model of its family (today Opus 5.5, Sonnet 5.5 and Haiku 5.5), so a new model arrives when Claude Code moves the alias, with no bridge or omp update. To pin a version, set Claude Code's `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL` or `ANTHROPIC_DEFAULT_HAIKU_MODEL` for the omp process.
 
 Behind the scenes, omp's tools are bridged to Claude Code over MCP, but it should all work like normal in omp. Bash commands get a 120-second default timeout (matching Claude Code's default). Steering works mid-turn: a message sent while Claude is running a tool reaches it at that tool boundary, not after the whole turn finishes.
 
-The model list comes from omp's Anthropic catalog automatically — when omp adds a new Claude model, it appears in `/model` after updating omp, no bridge update needed. Dated snapshot ids (e.g. `claude-opus-4-5-20251101`) are not shown. Selection by shortcut or partial id always prefers an exact match first, then the newest version of the matching family.
-
-**Thinking levels** are per model, from the catalog: Opus 5.5 offers low through max, Sonnet 4.6 low through high, and so on. The level you pick is sent to Claude Code as its effort. Older budget-thinking models (Haiku 4.5, Opus/Sonnet 4.0–4.5) map omp's minimal..xhigh onto Claude Code's low..max.
-
-**1M Context:** 1M is enabled per a *measured* list — models verified to serve 1M through the SDK on every plan (Fable 5/5.1, Opus 5/4.8/4.7, Sonnet 5). A new model starts at 200K context until it's measured and added to that list, so no model can 400/429 its way through every turn. Opus 4.6 only gets 1M if you're on a Max plan or pay for Extra Usage. Sonnet 4.6 only gets 1M if you pay for Extra Usage. Set `provider.plan` and/or `provider.longContextExtraUsage` for those, as described in [Configuration](#configuration).
+**Context and thinking:** the aliased models run with a 1M context window by default (no `[1m]` suffix needed) and 128K output, and take every Claude Code effort level: low, medium, high, xhigh and max. The thinking level you pick in omp is sent as Claude Code's effort; omp's minimal is sent as low.
 
 ### What Claude Code sees of omp's system prompt
 
@@ -64,7 +60,7 @@ Delegated calls are isolated from your `~/.claude` estate: children don't read g
 
 - **`prompt`** — the question or task for Claude Code
 - **`mode`** — `read` (default, read files and search/fetch on web), `none`, or `full` (read+write+bash, disable this mode with `allowFullMode: false` in config)
-- **`model`** — `opus` (default), `sonnet`, `haiku`, or a full model ID
+- **`model`** — `opus` (default), `sonnet`, `haiku`, or a full model ID; passed to Claude Code as-is
 - **`thinking`** — effort level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`
 - **`isolated`** — when `true`, Claude gets a clean session with no conversation history (default: `false`)
 
@@ -81,8 +77,6 @@ Config: `~/.omp/agent/claude-bridge.json` (global) or `.omp/claude-bridge.json` 
     "description": "Custom tool description override"
   },
   "provider": {
-    "plan": "max",
-    "longContextExtraUsage": false,
     "strictMcpConfig": true,
     "pathToClaudeCodeExecutable": "/home/you/.nix-profile/bin/claude"
   }
@@ -99,14 +93,11 @@ Config: `~/.omp/agent/claude-bridge.json` (global) or `.omp/claude-bridge.json` 
 - `allowFullMode` — allow `mode: "full"`; set `false` to lock it out
 
 `provider`:
-- `plan` (default `"pro"`) — set to `"max"` if you have a Max (or Team Premium/Enterprise) Anthropic plan. This enables Opus 4.6 with 1M context.
-- `longContextExtraUsage` — set to `true` to enable 1M context models even if they cost money through Extra Usage on your plan. It enables Sonnet 4.6 with 1M on every plan and Opus 4.6 with 1M on Pro.
-- `forceTwoHundredK` — array of model ids to pin to 200K context (bare id, no `[1m]` suffix). Use if Claude Code won't serve a model at 1M on your plan.
 - `strictMcpConfig` — block MCP servers from `~/.claude.json` / `.mcp.json` (default `true`). Cloud MCP (Gmail/Drive via claude.ai OAuth) is always blocked.
 - `autoMemoryEnabled` — enable Claude Code's auto-memory system (default `false`)
 - `pathToClaudeCodeExecutable` — path to the `claude` binary. Useful if your OS/filesystem has the SDK's bundled musl/glibc binaries in a place where they can't run (e.g. Nix: `"/home/you/.nix-profile/bin/claude"`).
 
-**Startup notice:** the first interactive session to reach Claude Code lists whichever of `provider.plan` and `askClaude.enabled` you have left unset, then records `startupNoticeShown` (the date, `YYYY-MM-DD`) in the global config so it doesn't nag again.
+**Startup notice:** the first interactive session to reach Claude Code points out that `askClaude.enabled` is unset, then records `startupNoticeShown` (the date, `YYYY-MM-DD`) in the global config so it doesn't nag again.
 
 ## Tests
 
