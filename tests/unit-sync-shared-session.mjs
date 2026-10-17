@@ -162,6 +162,35 @@ describe("syncSharedSession", () => {
 		}
 	});
 
+	// omp mints a fresh provider session id at /clear while its events carry the session
+	// file's id, so a compaction after a /clear marks another mirror than the one serving
+	// the turns, and the compacted history reaches this one shorter and unmarked — its
+	// first message no longer the one the mirror recorded. On a session's own mirror that
+	// is still its conversation rewound: it must rebuild, not run the turn with no history.
+	it("rebuilds a session's own shorter history even when its first message changed", () => {
+		const cwd = mkdtempSync(join(tmpdir(), "sync-shared-session-"));
+		const sessionId = randomUUID();
+		try {
+			createSession({ sessionId, projectPath: cwd }).save();
+			__test.setSharedSession("own", { sessionId, cursor: 6, cwd, piSessionId: "own", origin: "user@1" });
+
+			const result = __test.syncSharedSession([
+				{ role: "user", content: "Compaction summary", timestamp: 100 },
+				{ role: "assistant", content: [{ type: "text", text: "Noted." }], timestamp: 101 },
+				{ role: "user", content: "Next", timestamp: 102 },
+			], cwd, undefined, undefined, "own");
+
+			assert.equal(result.sessionId, sessionId, "rebuilt in place from omp's history");
+			assert.equal(result.preserveSharedSession, undefined);
+			assert.equal(__test.getSharedSession("own")?.cursor, 2);
+			const session = openSession({ sessionId, projectPath: cwd });
+			assert.deepEqual(session.messages.map((m) => m.type), ["user", "assistant"]);
+		} finally {
+			deleteSession(sessionId, cwd);
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
 	// The rebuilt file holds one line per record, and a carried `@file` expansion
 	// is an `attachment` record — which `session.messages` filters out. Counting
 	// messages told every user who at-mentioned a file before switching providers

@@ -794,27 +794,24 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 		return { sessionId: sharedSession.sessionId };
 		}
 	}
-	// This is what keeps a caller with a pruned or short context from resuming
-	// — then overwriting — the bucket's session: shorter-than-cursor means the
-	// incoming history cannot be a continuation, so start clean and preserve.
-	// Historically this also caught reentrant subagents (a subagent's priors are
-	// shorter than the parent's cursor); with per-session mirrors it now catches
-	// the pruned-context shapes on a session's own bucket, and the non-isolated
-	// AskClaude path on the "(none)" bucket. The captured ephemeral session is
-	// deleted once its query completes (see preserveSharedSession in the
-	// completion handler).
+	// Shorter than the cursor: the incoming history cannot be a continuation of the
+	// bucket's session.
 	//
-	// It is NOT, despite an earlier comment here, the isolated compact-summary
-	// path: runIsolatedSummary never calls syncSharedSession at all.
+	// On a session's own bucket (omp passes its session id with every call) that is
+	// the conversation rewound: omp's retry after a reply with no actionable output
+	// drops that reply with no event, and a rewrite whose event marked another key
+	// (omp mints a fresh provider session id at /clear, while events carry the
+	// session file's id) arrives unmarked. It falls through to REBUILD, which keeps
+	// the history; a clean start here would run the turn with none.
 	//
-	// Only reachable when needsRebuild is false — user-facing history rewrites
-	// (/compact, session_tree, /clear, /new, /resume, /fork, /branch) always set
-	// needsRebuild or clear sharedSession before the next syncSharedSession call.
-	// /clear fires no event under omp; the before_agent_start reset_boundary check
-	// in the default export is what keeps it out of this branch. The same conversation
-	// arriving shorter without an event (omp's retry after a reply with no actionable
-	// output drops that reply) is told apart by its origin and rebuilt below.
-	const sameConversation = sharedSession?.origin !== undefined && sharedSession.origin === conversationOrigin(messages);
+	// The "(none)" bucket (a caller with no session id) keeps upstream's behaviour
+	// for a pruned or foreign context: start clean and preserve the bucket's
+	// session — unless the history is the same conversation (its first message
+	// matches), which rebuilds like the own-bucket case. The captured ephemeral
+	// session is deleted once its query completes (see preserveSharedSession in
+	// the completion handler). runIsolatedSummary never reaches here.
+	const sameConversation = piSessionId != null
+		|| (sharedSession?.origin !== undefined && sharedSession.origin === conversationOrigin(messages));
 	if (sharedSession && !sharedSession.needsRebuild && priorMessages.length < sharedSession.cursor && !sameConversation) {
 		debug(`Case 1 synthetic: clean start for shorter context, preserving shared session ${sharedSession.sessionId.slice(0, 8)}, cursor=${sharedSession.cursor}`);
 		debug(`syncResult: path=clean-start preserve-shared sessionId=${sharedSession.sessionId} cursor=${sharedSession.cursor}`);
