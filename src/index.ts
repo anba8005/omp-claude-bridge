@@ -28,6 +28,7 @@ const newAssistantMessageEventStream: () => AssistantMessageEventStream =
 	typeof _piAi.createAssistantMessageEventStream === "function"
 		? _piAi.createAssistantMessageEventStream
 		: () => new _piAi.AssistantMessageEventStream();
+import { cwdForCall } from "./session-cwd.js";
 import { updateUsage, type SdkUsage } from "./usage.js";
 import { rateLimitResponse } from "./rate-limit.js";
 
@@ -580,7 +581,7 @@ async function runIsolatedSummary(
 		// Every caller routes here on the one-off shape (isOneOffRequest: one user message, no
 		// session prompt) or on cacheRetention "none", so the lone user message is the prompt.
 		const promptText = extractIsolatedSummaryPrompt(context.messages);
-		const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
+		const cwd = cwdForCall(options as { cwd?: string; sessionId?: string } | undefined);
 		const compactProviderSettings = loadConfig(cwd).provider;
 		const claudeExecutable = compactProviderSettings?.pathToClaudeCodeExecutable;
 		// The registered id is a Claude Code alias (see models.ts), passed as-is.
@@ -1873,7 +1874,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	queryCtx.historyStale = false;
 	queryCtx.missedSteer = false;
 
-	const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
+	const cwd = cwdForCall(options as { cwd?: string; sessionId?: string } | undefined);
 	// The registered id is a Claude Code alias (see models.ts), passed as-is.
 	const cliModel = model.id;
 	// Which pi session this query serves — the attribution key for history
@@ -2167,12 +2168,14 @@ async function promptAndWait(
 		thinking?: string;
 		isolated?: boolean;
 		context?: Context["messages"];
+		/** The calling session's cwd (the tool context's), not the host process's. */
+		cwd?: string;
 		/** pi session the calling tool ran in — AskClaude's conversation continues
 	 *  the session that called it, so its sync and capture key that mirror. */
 		piSessionId?: string | null;
 	},
 ): Promise<{ responseText: string; stopReason: string }> {
-	const cwd = process.cwd();
+	const cwd = options?.cwd ?? process.cwd();
 	// An alias (opus, sonnet, haiku) or a full model id; Claude Code resolves either.
 	const cliModel = options?.model ?? "opus";
 
@@ -2580,6 +2583,7 @@ export default function (pi: ExtensionAPI) {
 						model: params.model,
 						thinking: params.thinking,
 						isolated,
+						cwd: ctx.cwd,
 						context: isolated ? undefined : buildSessionContext(ctx.sessionManager.getBranch()).messages as Context["messages"],
 						piSessionId: ctx.sessionManager.getSessionId(),
 					});
